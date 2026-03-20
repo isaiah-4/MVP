@@ -1,10 +1,14 @@
+import cv2
+
 from .utils import draw_ellipse
+from utils import get_center_of_bbox
 
 class PlayerTrackerAnnotations:
 
 
-    def __init__(self, player_tracker):
-        pass
+    def __init__(self):
+        self.default_player_color = (0, 0, 255)
+        self.ball_control_color = (0, 0, 255)
 
     def annotations(self, video_frames,tracker):
 
@@ -21,7 +25,19 @@ class PlayerTrackerAnnotations:
                 bbox = player.get("bbox") or player.get("box")
                 if bbox is None:
                     continue
-                frame = draw_ellipse(frame, bbox, (0, 0, 255), tracker_id=tracker_id)
+                player_color = player.get("team_color", self.default_player_color)
+                frame = draw_ellipse(frame, bbox, player_color, tracker_id=tracker_id)
+
+                if player.get("has_ball"):
+                    x_center, _ = get_center_of_bbox(bbox)
+                    marker_y = max(12, int(bbox[1]) - 12)
+                    cv2.circle(
+                        frame,
+                        (int(x_center), marker_y),
+                        8,
+                        self.ball_control_color,
+                        2,
+                    )
 
             output_video_frames.append(frame)
 

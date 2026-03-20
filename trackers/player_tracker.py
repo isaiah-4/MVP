@@ -14,7 +14,7 @@ class PlayerTracker:
         detections = []
         for i in range(0, len(frames), batch_size):
             batch_frames = frames[i:i + batch_size]
-            batch_detections = self.model.predict(batch_frames, conf=0.5)
+            batch_detections = self.model.predict(batch_frames, conf=0.5, verbose=False)
             detections += batch_detections
         return detections
         
@@ -30,7 +30,11 @@ class PlayerTracker:
 
         for frame_num,detection in enumerate(detections):
             cls_names = detection.names
-            cls_names_inv = {v: k for k, v in cls_names.items()}
+            player_class_ids = {
+                class_id
+                for class_id, class_name in cls_names.items()
+                if any(token in class_name.lower() for token in ("human", "player"))
+            }
 
 
             detections_supervision = sv.Detections.from_ultralytics(detection)
@@ -41,10 +45,10 @@ class PlayerTracker:
 
             for frame_detection in detections_with_tracker:
                 bbox = frame_detection[0].tolist()
-                cls_id = frame_detection[1]
-                track_id = frame_detection[4]
+                cls_id = int(frame_detection[3])
+                track_id = int(frame_detection[4])
 
-                if cls_id == cls_names_inv["human"]:
+                if cls_id in player_class_ids:
                     tracker[frame_num][track_id] = {"bbox": bbox}
 
 

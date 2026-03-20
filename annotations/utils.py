@@ -7,7 +7,8 @@ from utils import get_center_of_bbox, get_bbox_width
 
 def draw_triangle(frame, bbox, color):
     y = int(bbox[3])
-    x,_ = int(get_center_of_bbox(bbox)[0])
+    x, _ = get_center_of_bbox(bbox)
+    x = int(x)
 
     triangle_points = np.array([
         [x, y ],
@@ -71,3 +72,34 @@ def draw_ellipse(frame, bbox, color, tracker_id=None):
         
     return frame
 
+
+def put_text_with_outline(
+    frame,
+    text,
+    position,
+    font_scale=0.5,
+    color=(255, 255, 255),
+    outline_color=(0, 0, 0),
+    thickness=1,
+):
+    cv2.putText(
+        frame,
+        text,
+        position,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        outline_color,
+        thickness + 2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        text,
+        position,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        font_scale,
+        color,
+        thickness,
+        cv2.LINE_AA,
+    )
+    return frame

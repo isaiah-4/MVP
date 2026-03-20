@@ -1,1 +1,6 @@
 from .player_tracker_annotations import PlayerTrackerAnnotations
+from .ball_tracker_annotations import BallTrackerAnnotations
+from .court_keypoint_annotations import CourtKeypointAnnotations
+from .pass_interception_annotations import PassInterceptionAnnotations
+from .speed_distance_annotations import SpeedDistanceAnnotations
+from .tactical_view_annotations import TacticalViewAnnotations
