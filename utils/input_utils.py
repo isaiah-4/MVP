@@ -21,6 +21,7 @@ YOUTUBE_DOWNLOAD_FORMAT = "best[height<=720][ext=mp4]/best[height<=720]/best[ext
 @dataclass(frozen=True)
 class VideoRunPaths:
     source_key: str
+    base_source_key: str
     input_path: Path
     output_path: Path
     player_stub_path: Path
@@ -28,13 +29,16 @@ class VideoRunPaths:
     court_stub_path: Path
 
 
-def prepare_video_source(source: str) -> VideoRunPaths:
+def prepare_video_source(source: str, run_suffix: str | None = None) -> VideoRunPaths:
     project_root = Path(__file__).resolve().parent.parent
     source = source.strip()
-    source_key = build_source_key(source)
+    base_source_key = build_source_key(source)
+    source_key = base_source_key
+    if run_suffix:
+        source_key = f"{base_source_key}_{sanitize_name(run_suffix)}"
 
     if is_youtube_url(source):
-        download_path = project_root / "Input_vids" / "downloads" / f"{source_key}.mp4"
+        download_path = project_root / "Input_vids" / "downloads" / f"{base_source_key}.mp4"
         input_path = ensure_youtube_download(source, download_path)
     else:
         input_path = Path(source).expanduser()
@@ -46,6 +50,7 @@ def prepare_video_source(source: str) -> VideoRunPaths:
 
     return VideoRunPaths(
         source_key=source_key,
+        base_source_key=base_source_key,
         input_path=input_path,
         output_path=project_root / "Output_vids" / f"{source_key}_output.mp4",
         player_stub_path=project_root / "stubs" / f"{source_key}_player_tracker.pkl",

@@ -1,0 +1,509 @@
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from threading import Lock
+from time import time
+from uuid import uuid4
+
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from analysis_pipeline import AnalysisRunResult, run_analysis, run_chunked_full_analysis
+from utils.input_utils import extract_youtube_id, is_youtube_url
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+TEMPLATES = Jinja2Templates(directory=str(PROJECT_ROOT / "web" / "templates"))
+
+app = FastAPI(title="CourtVision MVP", version="0.1.0")
+app.mount("/assets", StaticFiles(directory=str(PROJECT_ROOT / "web" / "static")), name="assets")
+app.mount("/outputs", StaticFiles(directory=str(PROJECT_ROOT / "Output_vids")), name="outputs")
+
+EXECUTOR = ThreadPoolExecutor(max_workers=1)
+JOB_LOCK = Lock()
+RESULT_CACHE = {}
+ACTIVE_JOBS_BY_KEY = {}
+JOBS = {}
+ANALYSIS_PROFILES = {
+    "preview": {
+        "label": "Fast Preview",
+        "run_suffix": "preview_300",
+        "max_frames": 300,
+        "court_keypoint_interval": 8,
+    },
+    "full": {
+        "label": "Full Run",
+        "run_suffix": "full",
+        "max_frames": None,
+        "chunk_frames": 300,
+        "court_keypoint_interval": 12,
+    },
+}
+
+
+@dataclass
+class AnalysisJob:
+    job_id: str
+    cache_key: str
+    input_source: str
+    session_name: str
+    mode: str
+    player_id: str
+    analysis_profile: str
+    status: str = "queued"
+    error: str | None = None
+    result: AnalysisRunResult | None = None
+    progress: float = 0.0
+    progress_message: str = "Queued"
+    processed_frames: int = 0
+    total_frames: int = 0
+    processed_chunks: int = 0
+    total_chunks: int = 0
+    partial_outputs: list[dict] = field(default_factory=list)
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+
+def build_home_context(request, **overrides):
+    context = {
+        "request": request,
+        "error": None,
+        "form": {
+            "session_name": "Lakers Demo Session",
+            "mode": "game",
+            "analysis_profile": "preview",
+            "player_id": "",
+            "input": "Input_vids/video_1.mp4",
+        },
+        "available_now": [
+            "Processed feed with player, ball, court, and tactical overlays",
+            "Auto track IDs for everyone on the floor",
+            "Touch counts from confirmed ball possession changes",
+            "Average possession time per tracked player",
+            "Team pass and interception counts",
+        ],
+        "coming_next": [
+            "Shot detection for made vs. missed",
+            "Shot chart and hot zone views",
+            "Clip review and side-by-side comparisons",
+            "Real player identity matching instead of tracker IDs",
+            "AI review and form feedback",
+        ],
+    }
+    context.update(overrides)
+    return context
+
+
+def get_analysis_profile_config(analysis_profile):
+    if analysis_profile not in ANALYSIS_PROFILES:
+        raise ValueError(f"Unknown analysis profile: {analysis_profile}")
+    return ANALYSIS_PROFILES[analysis_profile]
+
+
+def normalize_input_key(input_source, analysis_profile):
+    source = input_source.strip()
+    profile_key = f"profile:{analysis_profile}"
+    if is_youtube_url(source):
+        video_id = extract_youtube_id(source)
+        if video_id is not None:
+            return f"{profile_key}:yt:{video_id}"
+        return f"{profile_key}:yt:{source}"
+
+    source_path = Path(source).expanduser()
+    if not source_path.is_absolute():
+        source_path = (PROJECT_ROOT / source_path).resolve()
+
+    if source_path.exists():
+        return f"{profile_key}:file:{source_path}:{source_path.stat().st_mtime_ns}"
+
+    return f"{profile_key}:file:{source_path}"
+
+
+def validate_input_source(input_source):
+    source = input_source.strip()
+    if is_youtube_url(source):
+        return
+
+    source_path = Path(source).expanduser()
+    if not source_path.is_absolute():
+        source_path = (PROJECT_ROOT / source_path).resolve()
+
+    if not source_path.exists():
+        raise FileNotFoundError(f"Video file not found: {source_path}")
+
+
+def render_dashboard(
+    request,
+    result,
+    session_name,
+    mode,
+    player_id,
+    input_source,
+    analysis_profile,
+):
+    return TEMPLATES.TemplateResponse(
+        "dashboard.html",
+        {
+            "request": request,
+            "session_name": session_name,
+            "mode": mode,
+            "analysis_profile": analysis_profile,
+            "analysis_profile_label": ANALYSIS_PROFILES[analysis_profile]["label"],
+            "player_id": player_id.strip(),
+            "input_source": input_source,
+            "input_path": str(result.input_path),
+            "source_key": result.source_key,
+            "output_url": f"/outputs/{result.output_path.name}",
+            "using_court_model": result.using_court_model,
+            "max_frames": result.max_frames,
+            "processed_frames": result.processed_frames,
+            "chunk_count": result.chunk_count or result.session_metrics.get("overview", {}).get("chunk_count", 1),
+            "player_ids_are_chunk_local": result.player_ids_are_chunk_local,
+            "chunk_outputs": list(result.chunk_outputs),
+            "metrics": result.session_metrics,
+            "cached_result": True,
+        },
+    )
+
+
+def submit_or_get_job(input_source, session_name, mode, player_id, analysis_profile):
+    get_analysis_profile_config(analysis_profile)
+    validate_input_source(input_source)
+    cache_key = normalize_input_key(input_source, analysis_profile)
+
+    with JOB_LOCK:
+        cached_result = RESULT_CACHE.get(cache_key)
+        if cached_result is not None:
+            return cached_result, None
+
+        active_job_id = ACTIVE_JOBS_BY_KEY.get(cache_key)
+        if active_job_id is not None:
+            return None, JOBS[active_job_id]
+
+        job_id = uuid4().hex
+        job = AnalysisJob(
+            job_id=job_id,
+            cache_key=cache_key,
+            input_source=input_source,
+            session_name=session_name,
+            mode=mode,
+            player_id=player_id,
+            analysis_profile=analysis_profile,
+            created_at=time(),
+            updated_at=time(),
+        )
+        JOBS[job_id] = job
+        ACTIVE_JOBS_BY_KEY[cache_key] = job_id
+
+    EXECUTOR.submit(run_job, job_id)
+    return None, job
+
+
+def run_job(job_id):
+    with JOB_LOCK:
+        job = JOBS[job_id]
+        job.status = "running"
+        job.progress_message = "Starting analysis"
+        job.updated_at = time()
+
+    try:
+        profile_config = get_analysis_profile_config(job.analysis_profile)
+        if job.analysis_profile == "full":
+            result = run_chunked_full_analysis(
+                job.input_source,
+                run_suffix=profile_config["run_suffix"],
+                chunk_frames=profile_config.get("chunk_frames", 300),
+                court_keypoint_interval=profile_config.get("court_keypoint_interval", 12),
+                progress_callback=lambda payload: update_job_progress(job_id, payload),
+            )
+        else:
+            update_job_progress(
+                job_id,
+                {
+                    "progress": 0.0,
+                    "progress_message": "Analyzing preview",
+                },
+            )
+            result = run_analysis(
+                job.input_source,
+                max_frames=profile_config["max_frames"],
+                run_suffix=profile_config["run_suffix"],
+                court_keypoint_interval=profile_config.get("court_keypoint_interval", 12),
+            )
+    except Exception as exc:
+        with JOB_LOCK:
+            job.status = "failed"
+            job.error = str(exc)
+            job.updated_at = time()
+            ACTIVE_JOBS_BY_KEY.pop(job.cache_key, None)
+        return
+
+    with JOB_LOCK:
+        job.status = "completed"
+        job.result = result
+        job.progress = 1.0
+        job.progress_message = "Completed"
+        job.processed_frames = result.processed_frames
+        job.total_frames = result.processed_frames
+        job.processed_chunks = result.chunk_count or 1
+        job.total_chunks = result.chunk_count or 1
+        job.partial_outputs = list(result.chunk_outputs)
+        job.updated_at = time()
+        RESULT_CACHE[job.cache_key] = result
+        ACTIVE_JOBS_BY_KEY.pop(job.cache_key, None)
+
+
+def update_job_progress(job_id, payload):
+    with JOB_LOCK:
+        job = JOBS.get(job_id)
+        if job is None or job.status == "failed":
+            return
+
+        if "progress" in payload:
+            job.progress = float(payload["progress"])
+        if "progress_message" in payload:
+            job.progress_message = str(payload["progress_message"])
+        if "processed_frames" in payload:
+            job.processed_frames = int(payload["processed_frames"])
+        if "total_frames" in payload:
+            job.total_frames = int(payload["total_frames"])
+        if "processed_chunks" in payload:
+            job.processed_chunks = int(payload["processed_chunks"])
+        if "total_chunks" in payload:
+            job.total_chunks = int(payload["total_chunks"])
+        if "partial_outputs" in payload:
+            job.partial_outputs = list(payload["partial_outputs"])
+        job.updated_at = time()
+
+
+def get_job(job_id):
+    with JOB_LOCK:
+        return JOBS.get(job_id)
+
+
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    return TEMPLATES.TemplateResponse(
+        "home.html",
+        build_home_context(request),
+    )
+
+
+@app.get("/analyze", response_class=HTMLResponse)
+def analyze_session(
+    request: Request,
+    input: str,
+    session_name: str = "New Session",
+    mode: str = "game",
+    analysis_profile: str = "preview",
+    player_id: str = "",
+):
+    form = {
+        "session_name": session_name,
+        "mode": mode,
+        "analysis_profile": analysis_profile,
+        "player_id": player_id,
+        "input": input,
+    }
+
+    try:
+        cached_result, job = submit_or_get_job(
+            input,
+            session_name,
+            mode,
+            player_id,
+            analysis_profile,
+        )
+    except Exception as exc:
+        return TEMPLATES.TemplateResponse(
+            "home.html",
+            build_home_context(request, error=str(exc), form=form),
+            status_code=400,
+        )
+
+    if cached_result is not None:
+        return render_dashboard(
+            request,
+            cached_result,
+            session_name,
+            mode,
+            player_id,
+            input,
+            analysis_profile,
+        )
+
+    return TEMPLATES.TemplateResponse(
+        "processing.html",
+        {
+            "request": request,
+            "job_id": job.job_id,
+            "session_name": session_name,
+            "mode": mode,
+            "analysis_profile": analysis_profile,
+            "analysis_profile_label": ANALYSIS_PROFILES[analysis_profile]["label"],
+            "player_id": player_id.strip(),
+            "input_source": input,
+            "progress": job.progress,
+            "progress_message": job.progress_message,
+            "processed_frames": job.processed_frames,
+            "total_frames": job.total_frames,
+            "processed_chunks": job.processed_chunks,
+            "total_chunks": job.total_chunks,
+            "partial_outputs": job.partial_outputs,
+        },
+    )
+
+
+@app.get("/results/{job_id}", response_class=HTMLResponse)
+def analysis_result(request: Request, job_id: str):
+    job = get_job(job_id)
+    if job is None:
+        return TEMPLATES.TemplateResponse(
+            "home.html",
+            build_home_context(request, error="Analysis job not found."),
+            status_code=404,
+        )
+
+    if job.status == "completed" and job.result is not None:
+        return render_dashboard(
+            request,
+            job.result,
+            job.session_name,
+            job.mode,
+            job.player_id,
+            job.input_source,
+            job.analysis_profile,
+        )
+
+    if job.status == "failed":
+        return TEMPLATES.TemplateResponse(
+            "home.html",
+            build_home_context(
+                request,
+                error=job.error or "Analysis failed.",
+                form={
+                    "session_name": job.session_name,
+                    "mode": job.mode,
+                    "analysis_profile": job.analysis_profile,
+                    "player_id": job.player_id,
+                    "input": job.input_source,
+                },
+            ),
+            status_code=500,
+        )
+
+    return TEMPLATES.TemplateResponse(
+        "processing.html",
+        {
+            "request": request,
+            "job_id": job.job_id,
+            "session_name": job.session_name,
+            "mode": job.mode,
+            "analysis_profile": job.analysis_profile,
+            "analysis_profile_label": ANALYSIS_PROFILES[job.analysis_profile]["label"],
+            "player_id": job.player_id.strip(),
+            "input_source": job.input_source,
+            "progress": job.progress,
+            "progress_message": job.progress_message,
+            "processed_frames": job.processed_frames,
+            "total_frames": job.total_frames,
+            "processed_chunks": job.processed_chunks,
+            "total_chunks": job.total_chunks,
+            "partial_outputs": job.partial_outputs,
+        },
+    )
+
+
+@app.get("/api/analyze")
+def analyze_session_api(
+    input: str,
+    session_name: str = "New Session",
+    mode: str = "game",
+    analysis_profile: str = "preview",
+    player_id: str = "",
+):
+    try:
+        cached_result, job = submit_or_get_job(
+            input,
+            session_name,
+            mode,
+            player_id,
+            analysis_profile,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "status": "failed",
+                "error": str(exc),
+            },
+            status_code=400,
+        )
+    if cached_result is not None:
+        payload = cached_result.to_public_dict()
+        payload["session_name"] = session_name
+        payload["mode"] = mode
+        payload["analysis_profile"] = analysis_profile
+        payload["player_id"] = player_id
+        payload["output_url"] = f"/outputs/{cached_result.output_path.name}"
+        payload["status"] = "completed"
+        payload["cached"] = True
+        return JSONResponse(payload)
+
+    return JSONResponse(
+        {
+            "status": job.status,
+            "job_id": job.job_id,
+            "poll_url": f"/api/jobs/{job.job_id}",
+            "result_url": f"/results/{job.job_id}",
+            "analysis_profile": analysis_profile,
+        },
+        status_code=202,
+    )
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job_status(job_id: str):
+    job = get_job(job_id)
+    if job is None:
+        return JSONResponse({"status": "missing"}, status_code=404)
+
+    payload = {
+        "job_id": job.job_id,
+        "status": job.status,
+        "session_name": job.session_name,
+        "mode": job.mode,
+        "analysis_profile": job.analysis_profile,
+        "player_id": job.player_id,
+        "input": job.input_source,
+        "result_url": f"/results/{job.job_id}",
+        "progress": job.progress,
+        "progress_message": job.progress_message,
+        "processed_frames": job.processed_frames,
+        "total_frames": job.total_frames,
+        "processed_chunks": job.processed_chunks,
+        "total_chunks": job.total_chunks,
+        "partial_outputs": job.partial_outputs,
+    }
+
+    if job.status == "failed":
+        payload["error"] = job.error
+        return JSONResponse(payload, status_code=500)
+
+    if job.status == "completed" and job.result is not None:
+        payload.update(job.result.to_public_dict())
+        payload["output_url"] = f"/outputs/{job.result.output_path.name}"
+
+    return JSONResponse(payload)
+
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("live_main:app", host="127.0.0.1", port=8000, reload=False)

@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Processing - CourtVision</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body class="app-shell">
+    <main class="page processing-page">
+        <section class="processing-card">
+            <p class="eyebrow">Analysis In Progress</p>
+            <h1>{{ session_name }}</h1>
+            <p class="lede">
+                New videos are processed in the background now, so the site stays responsive while
+                tracking, court projection, and render generation run.
+            </p>
+            <div class="processing-meta">
+                <span class="status-pill is-warn" id="job-status">Queued</span>
+                <span class="status-pill">{{ mode|title }}</span>
+                <span class="status-pill">{{ analysis_profile_label }}</span>
+                {% if player_id %}
+                <span class="status-pill">Workout label: {{ player_id }}</span>
+                {% endif %}
+            </div>
+            <p class="meta-copy">Source: {{ input_source }}</p>
+            <p class="meta-copy">Job ID: {{ job_id }}</p>
+            <div class="summary-grid processing-summary">
+                <article class="metric-card">
+                    <span class="metric-label">Progress</span>
+                    <strong id="job-progress">{{ ((progress or 0) * 100)|round|int }}%</strong>
+                </article>
+                <article class="metric-card">
+                    <span class="metric-label">Frames</span>
+                    <strong id="job-frames">
+                        {% if total_frames %}
+                        {{ processed_frames }}/{{ total_frames }}
+                        {% else %}
+                        {{ processed_frames or 0 }}
+                        {% endif %}
+                    </strong>
+                </article>
+                <article class="metric-card">
+                    <span class="metric-label">Chunks</span>
+                    <strong id="job-chunks">
+                        {% if total_chunks %}
+                        {{ processed_chunks }}/{{ total_chunks }}
+                        {% else %}
+                        {{ processed_chunks or 0 }}
+                        {% endif %}
+                    </strong>
+                </article>
+            </div>
+            <div class="progress-track" aria-hidden="true">
+                <div class="progress-fill" id="job-progress-bar" style="width: {{ ((progress or 0) * 100)|round(2) }}%;"></div>
+            </div>
+            <p class="meta-copy" id="job-progress-message">{{ progress_message or "Queued" }}</p>
+            <p class="meta-copy">
+                First-time runs on a new video can still take a while. Once finished, the result is cached and reloads much faster.
+            </p>
+            <section class="info-card {% if not partial_outputs %}is-hidden{% endif %}" id="partial-output-panel">
+                <p class="eyebrow">Ready Chunks</p>
+                <ul class="chunk-output-list" id="partial-output-list">
+                    {% for chunk in partial_outputs %}
+                    <li class="chunk-output-item">
+                        <a class="ghost-link" href="{{ chunk.output_url }}">Chunk {{ chunk.chunk_index }}</a>
+                        <span>Frames {{ chunk.start_frame + 1 }}-{{ chunk.start_frame + chunk.frame_count }}</span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </section>
+            <a class="ghost-link" href="/">Back</a>
+        </section>
+    </main>
+
+    <script>
+        const jobId = "{{ job_id }}";
+        const statusNode = document.getElementById("job-status");
+        const progressNode = document.getElementById("job-progress");
+        const framesNode = document.getElementById("job-frames");
+        const chunksNode = document.getElementById("job-chunks");
+        const progressBarNode = document.getElementById("job-progress-bar");
+        const progressMessageNode = document.getElementById("job-progress-message");
+        const partialOutputPanel = document.getElementById("partial-output-panel");
+        const partialOutputList = document.getElementById("partial-output-list");
+
+        function renderPartialOutputs(outputs) {
+            partialOutputList.innerHTML = "";
+
+            if (!outputs || outputs.length === 0) {
+                partialOutputPanel.classList.add("is-hidden");
+                return;
+            }
+
+            partialOutputPanel.classList.remove("is-hidden");
+
+            outputs.forEach((chunk) => {
+                const item = document.createElement("li");
+                item.className = "chunk-output-item";
+
+                const link = document.createElement("a");
+                link.className = "ghost-link";
+                link.href = chunk.output_url;
+                link.textContent = `Chunk ${chunk.chunk_index}`;
+
+                const text = document.createElement("span");
+                const startFrame = Number(chunk.start_frame || 0) + 1;
+                const endFrame = Number(chunk.start_frame || 0) + Number(chunk.frame_count || 0);
+                text.textContent = `Frames ${startFrame}-${endFrame}`;
+
+                item.appendChild(link);
+                item.appendChild(text);
+                partialOutputList.appendChild(item);
+            });
+        }
+
+        function renderPayload(payload) {
+            const progressPercent = Math.max(0, Math.min(100, Math.round((payload.progress || 0) * 100)));
+            progressNode.textContent = `${progressPercent}%`;
+            progressBarNode.style.width = `${progressPercent}%`;
+            progressMessageNode.textContent = payload.progress_message || "Queued";
+
+            if (payload.total_frames) {
+                framesNode.textContent = `${payload.processed_frames || 0}/${payload.total_frames}`;
+            } else {
+                framesNode.textContent = `${payload.processed_frames || 0}`;
+            }
+
+            if (payload.total_chunks) {
+                chunksNode.textContent = `${payload.processed_chunks || 0}/${payload.total_chunks}`;
+            } else {
+                chunksNode.textContent = `${payload.processed_chunks || 0}`;
+            }
+
+            renderPartialOutputs(payload.partial_outputs || []);
+        }
+
+        async function pollJob() {
+            const response = await fetch(`/api/jobs/${jobId}`, { cache: "no-store" });
+            const payload = await response.json();
+            renderPayload(payload);
+
+            if (payload.status === "completed") {
+                statusNode.textContent = "Completed";
+                statusNode.classList.remove("is-warn");
+                statusNode.classList.add("is-good");
+                window.location.assign(payload.result_url);
+                return;
+            }
+
+            if (payload.status === "failed") {
+                statusNode.textContent = "Failed";
+                statusNode.classList.remove("is-warn");
+                window.alert(payload.error || "Analysis failed.");
+                window.location.assign("/");
+                return;
+            }
+
+            statusNode.textContent = payload.status === "running" ? "Running" : "Queued";
+            window.setTimeout(pollJob, 2000);
+        }
+
+        renderPayload({
+            progress: {{ progress or 0 }},
+            progress_message: {{ (progress_message or "Queued")|tojson }},
+            processed_frames: {{ processed_frames or 0 }},
+            total_frames: {{ total_frames or 0 }},
+            processed_chunks: {{ processed_chunks or 0 }},
+            total_chunks: {{ total_chunks or 0 }},
+            partial_outputs: {{ (partial_outputs or [])|tojson }},
+        });
+        window.setTimeout(pollJob, 1200);
+    </script>
+</body>
+</html>

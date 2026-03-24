@@ -1,14 +1,14 @@
-from ultralytics import YOLO
 import numpy as np
 import supervision as sv
 import sys 
 sys.path.append("../utils")
 from utils import get_center_of_bbox, save_stub, read_stub
+from .model_store import get_yolo_model
 
 
 class ballTracker:
     def __init__(self, model_path):
-        self.model = YOLO(model_path) 
+        self.model = get_yolo_model(model_path) 
 
 
     def detect_frames(self, frames):

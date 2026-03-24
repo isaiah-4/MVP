@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CourtVision MVP</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body class="app-shell">
+    <main class="page home-page">
+        <section class="hero-panel">
+            <p class="eyebrow">Basketball Service MVP</p>
+            <h1>CourtVision</h1>
+            <p class="lede">
+                This is the first product shell around the analysis pipeline from the tutorial:
+                upload or point at a video source, choose workout or game mode, and get a processed
+                feed plus touch and possession stats.
+            </p>
+            {% if error %}
+            <div class="alert-card">
+                <strong>Run failed.</strong>
+                <span>{{ error }}</span>
+            </div>
+            {% endif %}
+            <form class="session-form" action="/analyze" method="get">
+                <label>
+                    <span>Session Name</span>
+                    <input type="text" name="session_name" value="{{ form.session_name }}" required>
+                </label>
+                <label>
+                    <span>Video Source</span>
+                    <input type="text" name="input" value="{{ form.input }}" required>
+                </label>
+                <div class="mode-grid">
+                    <label class="mode-card">
+                        <input type="radio" name="analysis_profile" value="preview" {% if form.analysis_profile == "preview" %}checked{% endif %}>
+                        <span class="mode-title">Fast Preview</span>
+                        <span class="mode-copy">Default. Runs only the first 300 frames so a new video returns much faster.</span>
+                    </label>
+                    <label class="mode-card">
+                        <input type="radio" name="analysis_profile" value="full" {% if form.analysis_profile == "full" %}checked{% endif %}>
+                        <span class="mode-title">Full Run</span>
+                        <span class="mode-copy">Processes the whole video. Slower, but no preview cap.</span>
+                    </label>
+                </div>
+                <div class="mode-grid">
+                    <label class="mode-card">
+                        <input type="radio" name="mode" value="workout" {% if form.mode == "workout" %}checked{% endif %}>
+                        <span class="mode-title">Workout</span>
+                        <span class="mode-copy">Manual workout flow with a player label captured in session metadata.</span>
+                    </label>
+                    <label class="mode-card">
+                        <input type="radio" name="mode" value="game" {% if form.mode == "game" %}checked{% endif %}>
+                        <span class="mode-title">Game</span>
+                        <span class="mode-copy">Game flow using tracker IDs for everyone on the floor.</span>
+                    </label>
+                </div>
+                <label id="player-id-row" class="{% if form.mode != 'workout' %}is-hidden{% endif %}">
+                    <span>Workout Player Label</span>
+                    <input type="text" name="player_id" value="{{ form.player_id }}" placeholder="Example: 12">
+                </label>
+                <button class="primary-button" type="submit">Run Session</button>
+            </form>
+        </section>
+
+        <aside class="side-panel">
+            <div class="info-card">
+                <h2>Live Now</h2>
+                <ul>
+                    {% for item in available_now %}
+                    <li>{{ item }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            <div class="info-card">
+                <h2>Next Build Targets</h2>
+                <ul>
+                    {% for item in coming_next %}
+                    <li>{{ item }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </aside>
+    </main>
+
+    <script>
+        const modeInputs = document.querySelectorAll('input[name="mode"]');
+        const playerRow = document.getElementById('player-id-row');
+
+        function syncPlayerField() {
+            const selected = document.querySelector('input[name="mode"]:checked');
+            if (!selected) return;
+            playerRow.classList.toggle('is-hidden', selected.value !== 'workout');
+        }
+
+        modeInputs.forEach((input) => input.addEventListener('change', syncPlayerField));
+        syncPlayerField();
+    </script>
+</body>
+</html>

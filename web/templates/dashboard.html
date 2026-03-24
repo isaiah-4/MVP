@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ session_name }} - CourtVision</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body class="app-shell">
+    <main class="page dashboard-page">
+        <header class="dashboard-header">
+            <div>
+                <p class="eyebrow">{{ mode|title }} Session</p>
+                <h1>{{ session_name }}</h1>
+                <p class="meta-copy">Source: {{ input_source }}</p>
+                <p class="meta-copy">Resolved input: {{ input_path }}</p>
+            </div>
+            <div class="status-stack">
+                <span class="status-pill {% if using_court_model %}is-good{% else %}is-warn{% endif %}">
+                    {% if using_court_model %}Court model active{% else %}Fallback court projection{% endif %}
+                </span>
+                <span class="status-pill">{{ analysis_profile_label }}</span>
+                {% if chunk_count and chunk_count > 1 %}
+                <span class="status-pill">{{ chunk_count }} chunks</span>
+                {% endif %}
+                {% if max_frames %}
+                <span class="status-pill">First {{ max_frames }} frames</span>
+                {% endif %}
+                {% if player_id %}
+                <span class="status-pill">Workout label: {{ player_id }}</span>
+                {% endif %}
+                <a class="ghost-link" href="/">Back</a>
+            </div>
+        </header>
+
+        <section class="summary-grid">
+            <article class="metric-card">
+                <span class="metric-label">Tracked Players</span>
+                <strong>{{ metrics.overview.tracked_players }}</strong>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">Total Touches</span>
+                <strong>{{ metrics.overview.total_touches }}</strong>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">Avg Touch Length</span>
+                <strong>{{ "%.2f"|format(metrics.overview.average_touch_length_seconds) }}s</strong>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">Frames Processed</span>
+                <strong>{{ metrics.overview.source_frames }}</strong>
+            </article>
+        </section>
+
+        <section class="content-grid">
+            <article class="video-card">
+                <div class="section-head">
+                    <h2>View Feed</h2>
+                    <span>Processed session output</span>
+                </div>
+                <video controls preload="metadata" class="processed-video">
+                    <source src="{{ output_url }}" type="video/mp4">
+                </video>
+            </article>
+
+            <article class="roadmap-card">
+                <div class="section-head">
+                    <h2>MVP Gaps</h2>
+                    <span>Aligned to your draft</span>
+                </div>
+                <ul>
+                    {% if analysis_profile == "preview" %}
+                    <li>This run is a preview, so the dashboard reflects only the first {{ max_frames }} frames.</li>
+                    {% endif %}
+                    {% if player_ids_are_chunk_local %}
+                    <li>This full run was processed in chunks, so player IDs below are chunk-local until cross-chunk identity matching is added.</li>
+                    <li>Touch, pass, and interception totals can drift slightly at chunk boundaries until possession state is carried across chunks.</li>
+                    {% endif %}
+                    <li>Shot chart is not live yet because made vs. missed shot detection is not implemented.</li>
+                    <li>Hot zones are blocked on shot event detection and court-normalized shot coordinates.</li>
+                    <li>Workout player labels are captured in the session, but true identity matching is still future work.</li>
+                    <li>Clip review, AI coaching, and 3D body analysis are still roadmap items.</li>
+                </ul>
+            </article>
+        </section>
+
+        <section class="table-grid">
+            <article class="table-card">
+                <div class="section-head">
+                    <h2>Player Possession Stats</h2>
+                    <span>{% if player_ids_are_chunk_local %}Chunk-local tracker IDs{% else %}Tracker IDs for this session{% endif %}</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Player ID</th>
+                            <th>Team</th>
+                            <th>Tracked Frames</th>
+                            <th>Touches</th>
+                            <th>Possession Time</th>
+                            <th>Avg Possession</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in metrics.players %}
+                        <tr>
+                            <td>{{ row.player_id }}</td>
+                            <td>{% if row.team_id == -1 %}-{% else %}{{ row.team_id }}{% endif %}</td>
+                            <td>{{ row.tracked_frames }}</td>
+                            <td>{{ row.touches }}</td>
+                            <td>{{ "%.2f"|format(row.possession_seconds) }}s</td>
+                            <td>{{ "%.2f"|format(row.average_possession_seconds) }}s</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </article>
+
+            <article class="table-card">
+                <div class="section-head">
+                    <h2>Team Session Stats</h2>
+                    <span>From confirmed possession events</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Team</th>
+                            <th>Passes</th>
+                            <th>Interceptions</th>
+                            <th>Possession Time</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in metrics.teams %}
+                        <tr>
+                            <td>{{ row.team_id }}</td>
+                            <td>{{ row.passes }}</td>
+                            <td>{{ row.interceptions }}</td>
+                            <td>{{ "%.2f"|format(row.possession_seconds) }}s</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </article>
+        </section>
+
+        {% if chunk_outputs %}
+        <section class="table-grid">
+            <article class="table-card">
+                <div class="section-head">
+                    <h2>Chunk Outputs</h2>
+                    <span>Partial artifacts from the full run</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Chunk</th>
+                            <th>Frames</th>
+                            <th>Output</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for chunk in chunk_outputs %}
+                        <tr>
+                            <td>{{ chunk.chunk_index }} / {{ chunk.chunk_count }}</td>
+                            <td>{{ chunk.start_frame + 1 }}-{{ chunk.start_frame + chunk.frame_count }}</td>
+                            <td><a class="inline-link" href="{{ chunk.output_url }}">{{ chunk.output_name }}</a></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </article>
+        </section>
+        {% endif %}
+    </main>
+</body>
+</html>
