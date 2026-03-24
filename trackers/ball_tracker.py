@@ -1,7 +1,5 @@
 import numpy as np
 import supervision as sv
-import sys 
-sys.path.append("../utils")
 from utils import get_center_of_bbox, save_stub, read_stub
 from .model_store import get_yolo_model
 
@@ -20,51 +18,37 @@ class ballTracker:
             detections += batch_detections
         return detections
 
+    def get_tracks(self, frames, read_from_stub=False, stub_path=None):
+        tracker = read_stub(read_from_stub, stub_path)
+        if isinstance(tracker, dict):
+            ball_tracks = tracker.get("ball")
+            hoop_tracks = tracker.get("hoop")
+            if self._is_valid_track_list(ball_tracks, frames) and self._is_valid_track_list(
+                hoop_tracks,
+                frames,
+            ):
+                return ball_tracks, hoop_tracks
+
+        detections = self.detect_frames(frames)
+        track_bundle = self._extract_tracks(detections)
+        save_stub(stub_path, track_bundle)
+        return track_bundle["ball"], track_bundle["hoop"]
 
     def get_object_tracks(self, frames, read_from_stub=False, stub_path=None):
-        
-        tracker = read_stub(read_from_stub, stub_path)
-        if tracker is not None:
-            if len(tracker) == len(frames):
-                return tracker
-            
-        detections = self.detect_frames(frames)
-        tracker = []
+        ball_tracks, _ = self.get_tracks(
+            frames,
+            read_from_stub=read_from_stub,
+            stub_path=stub_path,
+        )
+        return ball_tracks
 
-        for frame_num,detection in enumerate(detections):
-            cls_names = detection.names
-            cls_names_inv = {v: k for k, v in cls_names.items()}
-
-
-            detections_supervision = sv.Detections.from_ultralytics(detection)
-
-            tracker.append({})
-            chosenBBox = None
-            max_conf = 0
-            ball_class_ids = {
-                class_id for class_name, class_id in cls_names_inv.items()
-                if "ball" in class_name.lower()
-            }
-
-            for frame_detection in detections_supervision:
-                bbox = frame_detection[0].tolist()
-                confidence = float(frame_detection[2])
-                cls_id = int(frame_detection[3])
-
-                if cls_id in ball_class_ids:
-                    if max_conf < confidence:
-                        chosenBBox = bbox
-                        max_conf = confidence
-
-            if chosenBBox is not None:
-                tracker[frame_num][0] = {"bbox": chosenBBox}
-            
-
-
-
-        save_stub(stub_path, tracker)
-        
-        return tracker
+    def get_hoop_tracks(self, frames, read_from_stub=False, stub_path=None):
+        _, hoop_tracks = self.get_tracks(
+            frames,
+            read_from_stub=read_from_stub,
+            stub_path=stub_path,
+        )
+        return hoop_tracks
 
     def remove_wrong_detections(self, ball_positions):
         max_allowed_distance = 25
@@ -96,15 +80,15 @@ class ballTracker:
 
         return ball_positions
 
-    def interpolate_ball_positions(self, ball_positions):
-        if not ball_positions:
-            return ball_positions
+    def interpolate_track_positions(self, track_positions):
+        if not track_positions:
+            return track_positions
 
         bbox_rows = []
         valid_rows = []
 
-        for frame_index, ball_track in enumerate(ball_positions):
-            bbox = self._get_ball_bbox(ball_track)
+        for frame_index, track_dict in enumerate(track_positions):
+            bbox = self._get_ball_bbox(track_dict)
             if bbox is None:
                 bbox_rows.append([np.nan, np.nan, np.nan, np.nan])
                 continue
@@ -113,10 +97,10 @@ class ballTracker:
             valid_rows.append(frame_index)
 
         if not valid_rows:
-            return ball_positions
+            return track_positions
 
         bbox_array = np.asarray(bbox_rows, dtype=float)
-        frame_indices = np.arange(len(ball_positions), dtype=float)
+        frame_indices = np.arange(len(track_positions), dtype=float)
 
         for coordinate_index in range(4):
             valid_mask = ~np.isnan(bbox_array[:, coordinate_index])
@@ -131,6 +115,61 @@ class ballTracker:
             })
 
         return interpolated_positions
+
+    def _extract_tracks(self, detections):
+        ball_tracks = []
+        hoop_tracks = []
+
+        for frame_num, detection in enumerate(detections):
+            cls_names = detection.names
+            ball_class_ids = {
+                int(class_id)
+                for class_id, class_name in cls_names.items()
+                if "ball" in class_name.lower()
+            }
+            hoop_class_ids = {
+                int(class_id)
+                for class_id, class_name in cls_names.items()
+                if any(token in class_name.lower() for token in ("hoop", "rim"))
+            }
+
+            detections_supervision = sv.Detections.from_ultralytics(detection)
+            chosen_ball_bbox = None
+            chosen_hoop_bbox = None
+            max_ball_conf = 0.0
+            max_hoop_conf = 0.0
+
+            ball_tracks.append({})
+            hoop_tracks.append({})
+
+            for frame_detection in detections_supervision:
+                bbox = frame_detection[0].tolist()
+                confidence = float(frame_detection[2])
+                cls_id = int(frame_detection[3])
+
+                if cls_id in ball_class_ids and confidence >= max_ball_conf:
+                    chosen_ball_bbox = bbox
+                    max_ball_conf = confidence
+
+                if cls_id in hoop_class_ids and confidence >= max_hoop_conf:
+                    chosen_hoop_bbox = bbox
+                    max_hoop_conf = confidence
+
+            if chosen_ball_bbox is not None:
+                ball_tracks[frame_num][0] = {"bbox": chosen_ball_bbox}
+            if chosen_hoop_bbox is not None:
+                hoop_tracks[frame_num][0] = {"bbox": chosen_hoop_bbox}
+
+        return {
+            "ball": ball_tracks,
+            "hoop": hoop_tracks,
+        }
+
+    def _is_valid_track_list(self, tracker, frames):
+        return isinstance(tracker, list) and len(tracker) == len(frames)
+
+    def interpolate_ball_positions(self, ball_positions):
+        return self.interpolate_track_positions(ball_positions)
 
     def _get_ball_bbox(self, ball_track):
         for track in ball_track.values():

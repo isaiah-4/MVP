@@ -8,6 +8,7 @@ from analytics import (
     CourtProjector,
     PassInterceptionDetector,
     SessionMetricsBuilder,
+    ShotDetector,
     SpeedDistanceCalculator,
     TeamAssigner,
 )
@@ -163,13 +164,14 @@ def run_analysis(
         stub_path=str(video_run.player_stub_path),
     )
 
-    ball_tracks = ball_tracker_model.get_object_tracks(
+    ball_tracks, hoop_tracks = ball_tracker_model.get_tracks(
         video_frames,
         read_from_stub=use_stubs,
         stub_path=str(video_run.ball_stub_path),
     )
     ball_tracks = ball_tracker_model.remove_wrong_detections(ball_tracks)
     ball_tracks = ball_tracker_model.interpolate_ball_positions(ball_tracks)
+    hoop_tracks = ball_tracker_model.interpolate_track_positions(hoop_tracks)
 
     team_assigner = TeamAssigner()
     team_assignments = team_assigner.assign_teams(video_frames, player_tracks)
@@ -205,6 +207,15 @@ def run_analysis(
         court_keypoints,
         player_tracks,
         ball_tracks,
+    )
+
+    shot_detector = ShotDetector()
+    shot_data = shot_detector.detect(
+        player_tracks,
+        ball_tracks,
+        hoop_tracks,
+        possession_data,
+        projection_data["player_positions_m"],
     )
 
     speed_distance_calculator = SpeedDistanceCalculator(fps=input_fps)
@@ -256,6 +267,7 @@ def run_analysis(
         team_assignments,
         possession_data,
         pass_interception_data,
+        shot_data,
     )
 
     result = AnalysisRunResult(
@@ -475,6 +487,8 @@ def load_cached_result(
         return None
     if int(payload.get("start_frame", 0)) != int(start_frame):
         return None
+    if "shots" not in payload.get("session_metrics", {}):
+        return None
 
     return AnalysisRunResult.from_public_dict(payload)
 
@@ -490,16 +504,23 @@ def combine_chunk_session_metrics(chunk_results):
             "passes": 0,
             "interceptions": 0,
             "possession_seconds": 0.0,
+            "shot_attempts": 0,
+            "made_shots": 0,
         }
     )
     source_frames = 0
     total_touches = 0
     total_possession_seconds = 0.0
+    total_shot_attempts = 0
+    total_made_shots = 0
+    shot_events = []
 
     for chunk_index, chunk_result in enumerate(chunk_results, start=1):
         metrics = chunk_result.session_metrics
         overview = metrics.get("overview", {})
         source_frames += int(overview.get("source_frames", chunk_result.processed_frames))
+        total_shot_attempts += int(overview.get("total_shot_attempts", 0))
+        total_made_shots += int(overview.get("total_made_shots", 0))
 
         for row in metrics.get("players", []):
             prefixed_row = dict(row)
@@ -518,6 +539,22 @@ def combine_chunk_session_metrics(chunk_results):
             team_totals[team_id]["possession_seconds"] += float(
                 row.get("possession_seconds", 0.0)
             )
+            team_totals[team_id]["shot_attempts"] += int(row.get("shot_attempts", 0))
+            team_totals[team_id]["made_shots"] += int(row.get("made_shots", 0))
+
+        for event in metrics.get("shots", []):
+            prefixed_event = dict(event)
+            shooter_id = event.get("shooter_id", -1)
+            if shooter_id != -1:
+                prefixed_event["shooter_id"] = f"C{chunk_index}-P{shooter_id}"
+            prefixed_event["chunk_index"] = chunk_index
+            prefixed_event["frame_num"] = int(chunk_result.start_frame) + int(
+                event.get("frame_num", 0)
+            )
+            prefixed_event["release_frame"] = int(chunk_result.start_frame) + int(
+                event.get("release_frame", 0)
+            )
+            shot_events.append(prefixed_event)
 
     player_rows.sort(
         key=lambda row: (-int(row["touches"]), -int(row["tracked_frames"]), str(row["player_id"]))
@@ -529,6 +566,18 @@ def combine_chunk_session_metrics(chunk_results):
             "passes": int(team_totals[team_id]["passes"]),
             "interceptions": int(team_totals[team_id]["interceptions"]),
             "possession_seconds": float(team_totals[team_id]["possession_seconds"]),
+            "shot_attempts": int(team_totals[team_id]["shot_attempts"]),
+            "made_shots": int(team_totals[team_id]["made_shots"]),
+            "missed_shots": int(
+                max(team_totals[team_id]["shot_attempts"] - team_totals[team_id]["made_shots"], 0)
+            ),
+            "field_goal_percentage": float(
+                (
+                    (team_totals[team_id]["made_shots"] / team_totals[team_id]["shot_attempts"]) * 100.0
+                )
+                if team_totals[team_id]["shot_attempts"] > 0
+                else 0.0
+            ),
         }
         for team_id in sorted(team_totals)
     ]
@@ -539,18 +588,29 @@ def combine_chunk_session_metrics(chunk_results):
                 "passes": 0,
                 "interceptions": 0,
                 "possession_seconds": 0.0,
+                "shot_attempts": 0,
+                "made_shots": 0,
+                "missed_shots": 0,
+                "field_goal_percentage": 0.0,
             },
             {
                 "team_id": 2,
                 "passes": 0,
                 "interceptions": 0,
                 "possession_seconds": 0.0,
+                "shot_attempts": 0,
+                "made_shots": 0,
+                "missed_shots": 0,
+                "field_goal_percentage": 0.0,
             },
         ]
 
     average_touch_length_seconds = 0.0
     if total_touches > 0:
         average_touch_length_seconds = total_possession_seconds / total_touches
+    session_field_goal_percentage = 0.0
+    if total_shot_attempts > 0:
+        session_field_goal_percentage = (total_made_shots / total_shot_attempts) * 100.0
 
     return {
         "overview": {
@@ -560,7 +620,12 @@ def combine_chunk_session_metrics(chunk_results):
             "source_frames": int(source_frames),
             "chunk_count": len(chunk_results),
             "player_ids_are_chunk_local": len(chunk_results) > 1,
+            "total_shot_attempts": int(total_shot_attempts),
+            "total_made_shots": int(total_made_shots),
+            "total_missed_shots": int(max(total_shot_attempts - total_made_shots, 0)),
+            "field_goal_percentage": float(session_field_goal_percentage),
         },
         "players": player_rows,
         "teams": team_rows,
+        "shots": shot_events,
     }

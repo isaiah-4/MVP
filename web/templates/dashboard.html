@@ -50,6 +50,14 @@
                 <span class="metric-label">Frames Processed</span>
                 <strong>{{ metrics.overview.source_frames }}</strong>
             </article>
+            <article class="metric-card">
+                <span class="metric-label">Shot Attempts</span>
+                <strong>{{ metrics.overview.total_shot_attempts }}</strong>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">Field Goal %</span>
+                <strong>{{ "%.1f"|format(metrics.overview.field_goal_percentage) }}%</strong>
+            </article>
         </section>
 
         <section class="content-grid">
@@ -76,8 +84,8 @@
                     <li>This full run was processed in chunks, so player IDs below are chunk-local until cross-chunk identity matching is added.</li>
                     <li>Touch, pass, and interception totals can drift slightly at chunk boundaries until possession state is carried across chunks.</li>
                     {% endif %}
-                    <li>Shot chart is not live yet because made vs. missed shot detection is not implemented.</li>
-                    <li>Hot zones are blocked on shot event detection and court-normalized shot coordinates.</li>
+                    <li>Shot attempts and makes/misses are now heuristic detections based on release plus ball-to-hoop motion, so edge cases will still happen.</li>
+                    <li>Shot chart and hot zones are the next layer on top of these detected events and projected shot locations.</li>
                     <li>Workout player labels are captured in the session, but true identity matching is still future work.</li>
                     <li>Clip review, AI coaching, and 3D body analysis are still roadmap items.</li>
                 </ul>
@@ -99,6 +107,9 @@
                             <th>Touches</th>
                             <th>Possession Time</th>
                             <th>Avg Possession</th>
+                            <th>FGA</th>
+                            <th>FGM</th>
+                            <th>FG%</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -110,6 +121,9 @@
                             <td>{{ row.touches }}</td>
                             <td>{{ "%.2f"|format(row.possession_seconds) }}s</td>
                             <td>{{ "%.2f"|format(row.average_possession_seconds) }}s</td>
+                            <td>{{ row.shot_attempts }}</td>
+                            <td>{{ row.made_shots }}</td>
+                            <td>{{ "%.1f"|format(row.field_goal_percentage) }}%</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -128,6 +142,9 @@
                             <th>Passes</th>
                             <th>Interceptions</th>
                             <th>Possession Time</th>
+                            <th>FGA</th>
+                            <th>FGM</th>
+                            <th>FG%</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -137,12 +154,54 @@
                             <td>{{ row.passes }}</td>
                             <td>{{ row.interceptions }}</td>
                             <td>{{ "%.2f"|format(row.possession_seconds) }}s</td>
+                            <td>{{ row.shot_attempts }}</td>
+                            <td>{{ row.made_shots }}</td>
+                            <td>{{ "%.1f"|format(row.field_goal_percentage) }}%</td>
                         </tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </article>
         </section>
+
+        {% if metrics.shots %}
+        <section class="table-grid">
+            <article class="table-card">
+                <div class="section-head">
+                    <h2>Shot Events</h2>
+                    <span>Detected attempts with projected release points when available</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Frame</th>
+                            <th>Shooter</th>
+                            <th>Team</th>
+                            <th>Result</th>
+                            <th>Release Point</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for shot in metrics.shots %}
+                        <tr>
+                            <td>{{ shot.frame_num }}</td>
+                            <td>{{ shot.shooter_id }}</td>
+                            <td>{% if shot.team_id == -1 %}-{% else %}{{ shot.team_id }}{% endif %}</td>
+                            <td>{{ shot.result }}</td>
+                            <td>
+                                {% if shot.shot_position_m %}
+                                {{ "%.1f"|format(shot.shot_position_m[0]) }}, {{ "%.1f"|format(shot.shot_position_m[1]) }} m
+                                {% else %}
+                                -
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </article>
+        </section>
+        {% endif %}
 
         {% if chunk_outputs %}
         <section class="table-grid">

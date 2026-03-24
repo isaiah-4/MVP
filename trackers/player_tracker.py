@@ -1,7 +1,5 @@
 import supervision as sv
-import sys 
-sys.path.append("../utils")
-from utils import read_vid, save_vid, save_stub, read_stub
+from utils import save_stub, read_stub
 from .model_store import get_yolo_model
 
 class PlayerTracker:

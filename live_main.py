@@ -93,10 +93,10 @@ def build_home_context(request, **overrides):
             "Touch counts from confirmed ball possession changes",
             "Average possession time per tracked player",
             "Team pass and interception counts",
+            "First-pass shot attempts and makes/misses from ball, hoop, and release heuristics",
         ],
         "coming_next": [
-            "Shot detection for made vs. missed",
-            "Shot chart and hot zone views",
+            "Shot chart and hot zone views from detected attempt locations",
             "Clip review and side-by-side comparisons",
             "Real player identity matching instead of tracker IDs",
             "AI review and form feedback",

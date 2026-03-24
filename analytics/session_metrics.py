@@ -11,9 +11,13 @@ class SessionMetricsBuilder:
         team_assignments,
         possession_data,
         pass_interception_data,
+        shot_data=None,
     ):
+        shot_data = shot_data or {"events": []}
         player_metrics = {}
         team_possession_frames = Counter()
+        team_shot_totals = Counter()
+        team_make_totals = Counter()
 
         previous_holder = -1
         possession_start_frame = None
@@ -71,12 +75,43 @@ class SessionMetricsBuilder:
         player_rows = []
         total_touches = 0
         total_possession_frames = 0
+        total_shot_attempts = 0
+        total_made_shots = 0
+
+        for event in shot_data.get("events", []):
+            shooter_id = int(event.get("shooter_id", -1))
+            team_id = int(event.get("team_id", -1))
+            is_make = event.get("result") == "made"
+
+            if shooter_id != -1:
+                player_entry = self._get_player_entry(
+                    player_metrics,
+                    shooter_id,
+                    team_id,
+                )
+                player_entry["shot_attempts"] += 1
+                if is_make:
+                    player_entry["made_shots"] += 1
+
+            if team_id != -1:
+                team_shot_totals[team_id] += 1
+                if is_make:
+                    team_make_totals[team_id] += 1
+
+            total_shot_attempts += 1
+            if is_make:
+                total_made_shots += 1
 
         for player_id, metrics in player_metrics.items():
             possession_seconds = metrics["possession_frames"] / self.fps
             average_possession_seconds = 0.0
             if metrics["possessions"] > 0:
                 average_possession_seconds = possession_seconds / metrics["possessions"]
+            shot_attempts = int(metrics["shot_attempts"])
+            made_shots = int(metrics["made_shots"])
+            field_goal_percentage = 0.0
+            if shot_attempts > 0:
+                field_goal_percentage = (made_shots / shot_attempts) * 100.0
 
             row = {
                 "player_id": int(player_id),
@@ -86,6 +121,10 @@ class SessionMetricsBuilder:
                 "possessions": int(metrics["possessions"]),
                 "possession_seconds": float(possession_seconds),
                 "average_possession_seconds": float(average_possession_seconds),
+                "shot_attempts": shot_attempts,
+                "made_shots": made_shots,
+                "missed_shots": int(max(shot_attempts - made_shots, 0)),
+                "field_goal_percentage": float(field_goal_percentage),
             }
             player_rows.append(row)
             total_touches += row["touches"]
@@ -113,24 +152,41 @@ class SessionMetricsBuilder:
                 for row in player_rows
                 if row["team_id"] != -1
             }
+            | {
+                int(team_id)
+                for team_id in team_shot_totals
+                if int(team_id) != -1
+            }
         )
         if not team_ids:
             team_ids = [1, 2]
 
         team_rows = []
         for team_id in team_ids:
+            attempts = int(team_shot_totals[team_id])
+            made = int(team_make_totals[team_id])
+            field_goal_percentage = 0.0
+            if attempts > 0:
+                field_goal_percentage = (made / attempts) * 100.0
             team_rows.append(
                 {
                     "team_id": int(team_id),
                     "passes": int(latest_passes.get(team_id, 0)),
                     "interceptions": int(latest_interceptions.get(team_id, 0)),
                     "possession_seconds": float(team_possession_frames[team_id] / self.fps),
+                    "shot_attempts": attempts,
+                    "made_shots": made,
+                    "missed_shots": int(max(attempts - made, 0)),
+                    "field_goal_percentage": float(field_goal_percentage),
                 }
             )
 
         average_touch_length_seconds = 0.0
         if total_touches > 0:
             average_touch_length_seconds = (total_possession_frames / self.fps) / total_touches
+        session_field_goal_percentage = 0.0
+        if total_shot_attempts > 0:
+            session_field_goal_percentage = (total_made_shots / total_shot_attempts) * 100.0
 
         return {
             "overview": {
@@ -138,9 +194,24 @@ class SessionMetricsBuilder:
                 "total_touches": int(total_touches),
                 "average_touch_length_seconds": float(average_touch_length_seconds),
                 "source_frames": len(player_tracks),
+                "total_shot_attempts": int(total_shot_attempts),
+                "total_made_shots": int(total_made_shots),
+                "total_missed_shots": int(max(total_shot_attempts - total_made_shots, 0)),
+                "field_goal_percentage": float(session_field_goal_percentage),
             },
             "players": player_rows,
             "teams": team_rows,
+            "shots": [
+                {
+                    "frame_num": int(event.get("frame_num", 0)),
+                    "release_frame": int(event.get("release_frame", 0)),
+                    "result": event.get("result", "missed"),
+                    "shooter_id": int(event.get("shooter_id", -1)),
+                    "team_id": int(event.get("team_id", -1)),
+                    "shot_position_m": event.get("shot_position_m"),
+                }
+                for event in shot_data.get("events", [])
+            ],
         }
 
     def _get_player_entry(self, player_metrics, player_id, team_id):
@@ -151,5 +222,7 @@ class SessionMetricsBuilder:
                 "touches": 0,
                 "possessions": 0,
                 "possession_frames": 0,
+                "shot_attempts": 0,
+                "made_shots": 0,
             }
         return player_metrics[player_id]
