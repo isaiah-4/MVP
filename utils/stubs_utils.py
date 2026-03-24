@@ -1,12 +1,14 @@
 import os
 import pickle
 
+
 def save_stub(stub_path, object):
     if stub_path is None:
         return
 
-    if not os.path.exists(os.path.dirname(stub_path)):
-        os.makedirs(os.path.dirname(stub_path))
+    parent_dir = os.path.dirname(stub_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
 
     with open(stub_path, 'wb') as f:
         pickle.dump(object, f)

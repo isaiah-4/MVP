@@ -157,7 +157,7 @@
             }
 
             statusNode.textContent = payload.status === "running" ? "Running" : "Queued";
-            window.setTimeout(pollJob, 2000);
+            window.setTimeout(pollJob, 1200);
         }
 
         renderPayload({
@@ -169,7 +169,7 @@
             total_chunks: {{ total_chunks or 0 }},
             partial_outputs: {{ (partial_outputs or [])|tojson }},
         });
-        window.setTimeout(pollJob, 1200);
+        window.setTimeout(pollJob, 800);
     </script>
 </body>
 </html>

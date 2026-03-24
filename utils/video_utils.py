@@ -3,6 +3,8 @@ import shutil
 
 import cv2
 
+VIDEO_CODEC_CANDIDATES = ("avc1", "H264", "mp4v")
+
 
 def read_vid(video_path, max_frames=None, start_frame=0):
     if not os.path.exists(video_path):
@@ -79,13 +81,11 @@ def concatenate_videos(input_paths, output_video_path, fps=None):
         raise ValueError("Could not determine video dimensions for concatenation.")
 
     output_dir = os.path.dirname(output_video_path)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(
+    writer = _open_video_writer(
         output_video_path,
-        fourcc,
         resolved_fps,
         (frame_width, frame_height),
     )
@@ -122,11 +122,31 @@ def save_vid(output_video_frames, output_video_path, fps=24.0):
     if not output_video_frames:
         raise ValueError("No frames were provided for video output.")
 
-    if not os.path.exists(os.path.dirname(output_video_path)):
-        os.makedirs(os.path.dirname(output_video_path))      
+    output_dir = os.path.dirname(output_video_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
-    fourcc= cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(output_video_path, fourcc, float(fps), (output_video_frames[0].shape[1], output_video_frames[0].shape[0]))
+    out = _open_video_writer(
+        output_video_path,
+        float(fps),
+        (output_video_frames[0].shape[1], output_video_frames[0].shape[0]),
+    )
     for frame in output_video_frames:
         out.write(frame)
     out.release()
+
+
+def _open_video_writer(output_video_path, fps, frame_size):
+    for codec_name in VIDEO_CODEC_CANDIDATES:
+        if os.path.exists(output_video_path):
+            os.remove(output_video_path)
+
+        fourcc = cv2.VideoWriter_fourcc(*codec_name)
+        writer = cv2.VideoWriter(output_video_path, fourcc, float(fps), frame_size)
+        if writer.isOpened():
+            return writer
+        writer.release()
+
+    raise ValueError(
+        f"Could not open a video writer for {output_video_path} using codecs {VIDEO_CODEC_CANDIDATES}."
+    )

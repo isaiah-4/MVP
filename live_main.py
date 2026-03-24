@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from threading import Lock
 from time import time
@@ -21,9 +22,18 @@ app = FastAPI(title="CourtVision MVP", version="0.1.0")
 app.mount("/assets", StaticFiles(directory=str(PROJECT_ROOT / "web" / "static")), name="assets")
 app.mount("/outputs", StaticFiles(directory=str(PROJECT_ROOT / "Output_vids")), name="outputs")
 
-EXECUTOR = ThreadPoolExecutor(max_workers=1)
+DEFAULT_MAX_WORKERS = max(1, int(os.environ.get("COURTVISION_MAX_WORKERS", "1")))
+JOB_TTL_SECONDS = int(os.environ.get("COURTVISION_JOB_TTL_SECONDS", str(6 * 60 * 60)))
+RESULT_CACHE_TTL_SECONDS = int(
+    os.environ.get("COURTVISION_RESULT_CACHE_TTL_SECONDS", str(6 * 60 * 60))
+)
+MAX_COMPLETED_JOBS = int(os.environ.get("COURTVISION_MAX_COMPLETED_JOBS", "100"))
+MAX_CACHED_RESULTS = int(os.environ.get("COURTVISION_MAX_CACHED_RESULTS", "64"))
+
+EXECUTOR = ThreadPoolExecutor(max_workers=DEFAULT_MAX_WORKERS)
 JOB_LOCK = Lock()
 RESULT_CACHE = {}
+RESULT_CACHE_UPDATED_AT = {}
 ACTIVE_JOBS_BY_KEY = {}
 JOBS = {}
 ANALYSIS_PROFILES = {
@@ -174,6 +184,7 @@ def submit_or_get_job(input_source, session_name, mode, player_id, analysis_prof
     cache_key = normalize_input_key(input_source, analysis_profile)
 
     with JOB_LOCK:
+        prune_state_locked()
         cached_result = RESULT_CACHE.get(cache_key)
         if cached_result is not None:
             return cached_result, None
@@ -252,7 +263,9 @@ def run_job(job_id):
         job.partial_outputs = list(result.chunk_outputs)
         job.updated_at = time()
         RESULT_CACHE[job.cache_key] = result
+        RESULT_CACHE_UPDATED_AT[job.cache_key] = job.updated_at
         ACTIVE_JOBS_BY_KEY.pop(job.cache_key, None)
+        prune_state_locked()
 
 
 def update_job_progress(job_id, payload):
@@ -280,7 +293,62 @@ def update_job_progress(job_id, payload):
 
 def get_job(job_id):
     with JOB_LOCK:
+        prune_state_locked()
         return JOBS.get(job_id)
+
+
+def prune_state_locked(now=None):
+    now = time() if now is None else float(now)
+
+    expired_cache_keys = [
+        cache_key
+        for cache_key, updated_at in RESULT_CACHE_UPDATED_AT.items()
+        if (now - updated_at) > RESULT_CACHE_TTL_SECONDS
+    ]
+    for cache_key in expired_cache_keys:
+        RESULT_CACHE.pop(cache_key, None)
+        RESULT_CACHE_UPDATED_AT.pop(cache_key, None)
+
+    if len(RESULT_CACHE_UPDATED_AT) > MAX_CACHED_RESULTS:
+        overflow_count = len(RESULT_CACHE_UPDATED_AT) - MAX_CACHED_RESULTS
+        oldest_cache_keys = sorted(
+            RESULT_CACHE_UPDATED_AT,
+            key=RESULT_CACHE_UPDATED_AT.get,
+        )[:overflow_count]
+        for cache_key in oldest_cache_keys:
+            RESULT_CACHE.pop(cache_key, None)
+            RESULT_CACHE_UPDATED_AT.pop(cache_key, None)
+
+    completed_jobs = [
+        job
+        for job in JOBS.values()
+        if job.status in {"completed", "failed"}
+    ]
+    expired_job_ids = {
+        job.job_id
+        for job in completed_jobs
+        if (now - job.updated_at) > JOB_TTL_SECONDS
+    }
+
+    remaining_completed_jobs = [
+        job
+        for job in completed_jobs
+        if job.job_id not in expired_job_ids
+    ]
+    if len(remaining_completed_jobs) > MAX_COMPLETED_JOBS:
+        overflow_count = len(remaining_completed_jobs) - MAX_COMPLETED_JOBS
+        oldest_jobs = sorted(
+            remaining_completed_jobs,
+            key=lambda job: job.updated_at,
+        )[:overflow_count]
+        expired_job_ids.update(job.job_id for job in oldest_jobs)
+
+    for job_id in expired_job_ids:
+        job = JOBS.pop(job_id, None)
+        if job is None:
+            continue
+        if ACTIVE_JOBS_BY_KEY.get(job.cache_key) == job_id:
+            ACTIVE_JOBS_BY_KEY.pop(job.cache_key, None)
 
 
 @app.get("/", response_class=HTMLResponse)

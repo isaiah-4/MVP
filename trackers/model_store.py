@@ -17,9 +17,23 @@ def get_yolo_model(model_path):
         if cached_model is not None:
             return cached_model
 
-        model = YOLO(str(resolved_path))
-        _MODEL_CACHE[cache_key] = model
-        return model
+        wrapped_model = ThreadSafeYOLOModel(YOLO(str(resolved_path)))
+        _MODEL_CACHE[cache_key] = wrapped_model
+        return wrapped_model
+
+
+class ThreadSafeYOLOModel:
+    def __init__(self, model):
+        self._model = model
+        self._predict_lock = Lock()
+
+    def predict(self, *args, **kwargs):
+        # Ultralytics model instances are not thread-safe for concurrent inference.
+        with self._predict_lock:
+            return self._model.predict(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
 
 
 def _build_cache_key(model_path):
