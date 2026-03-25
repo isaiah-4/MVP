@@ -122,11 +122,29 @@ def run_analysis(
     max_frames=None,
     start_frame=0,
     run_suffix=None,
+    progress_callback=None,
 ):
     video_run = prepare_video_source(input_source, run_suffix=run_suffix)
     resolved_output_path = Path(output_path) if output_path is not None else video_run.output_path
     cache_path = resolved_output_path.with_suffix(".json")
     resolved_start_frame = max(0, int(start_frame or 0))
+    local_total_frames = None
+
+    def emit_progress(progress, message):
+        if progress_callback is None:
+            return
+
+        payload = {
+            "progress": float(progress),
+            "progress_message": str(message),
+        }
+        if local_total_frames is not None:
+            payload["total_frames"] = int(local_total_frames)
+            payload["processed_frames"] = min(
+                int(round(local_total_frames * float(progress))),
+                int(local_total_frames),
+            )
+        progress_callback(payload)
 
     if use_stubs:
         cached_result = load_cached_result(
@@ -142,8 +160,11 @@ def run_analysis(
             start_frame=resolved_start_frame,
         )
         if cached_result is not None:
+            local_total_frames = cached_result.processed_frames
+            emit_progress(1.0, "Loaded cached result")
             return cached_result
 
+    emit_progress(0.01, "Loading video frames")
     video_frames = read_vid(
         str(video_run.input_path),
         max_frames=max_frames,
@@ -153,6 +174,8 @@ def run_analysis(
         raise ValueError(
             f"No video frames were available from frame {resolved_start_frame}: {video_run.input_path}"
         )
+    local_total_frames = len(video_frames)
+    emit_progress(0.05, "Loaded video frames")
     input_fps = get_video_fps(str(video_run.input_path))
 
     player_tracker_model = PlayerTracker(player_model)
@@ -163,6 +186,7 @@ def run_analysis(
         read_from_stub=use_stubs,
         stub_path=str(video_run.player_stub_path),
     )
+    emit_progress(0.22, "Detected players")
 
     ball_tracks, hoop_tracks = ball_tracker_model.get_tracks(
         video_frames,
@@ -172,9 +196,11 @@ def run_analysis(
     ball_tracks = ball_tracker_model.remove_wrong_detections(ball_tracks)
     ball_tracks = ball_tracker_model.interpolate_ball_positions(ball_tracks)
     hoop_tracks = ball_tracker_model.interpolate_track_positions(hoop_tracks)
+    emit_progress(0.38, "Detected ball and hoop")
 
     team_assigner = TeamAssigner()
     team_assignments = team_assigner.assign_teams(video_frames, player_tracks)
+    emit_progress(0.48, "Assigned teams")
 
     possession_analyzer = BallPossessionAnalyzer()
     possession_data = possession_analyzer.detect_possession(
@@ -185,6 +211,7 @@ def run_analysis(
 
     pass_interception_detector = PassInterceptionDetector()
     pass_interception_data = pass_interception_detector.detect(possession_data)
+    emit_progress(0.56, "Computed possession and passing")
 
     court_projector = CourtProjector()
     court_keypoints = court_projector.detect_keypoints(video_frames)
@@ -202,6 +229,7 @@ def run_analysis(
         )
         court_keypoints = court_projector.validate_keypoints(court_keypoints)
         using_court_model = True
+    emit_progress(0.68, "Projected court geometry")
 
     projection_data = court_projector.project_tracks(
         court_keypoints,
@@ -222,6 +250,7 @@ def run_analysis(
     speed_distance_data = speed_distance_calculator.calculate(
         projection_data["player_positions_m"]
     )
+    emit_progress(0.76, "Computed shot and movement analytics")
 
     player_tracker_annotations = PlayerTrackerAnnotations()
     ball_tracker_annotations = BallTrackerAnnotations()
@@ -258,8 +287,10 @@ def run_analysis(
         team_assignments,
         possession_data,
     )
+    emit_progress(0.9, "Rendered overlays")
 
     save_vid(output_video_frames, str(resolved_output_path), fps=input_fps)
+    emit_progress(0.97, "Saved processed video")
 
     session_metrics_builder = SessionMetricsBuilder(input_fps)
     session_metrics = session_metrics_builder.build(
@@ -292,6 +323,7 @@ def run_analysis(
         session_metrics=session_metrics,
     )
     save_cached_result(cache_path, result)
+    emit_progress(1.0, "Completed")
     return result
 
 
@@ -358,6 +390,35 @@ def run_chunked_full_analysis(
     for chunk_index, start_frame in enumerate(range(0, total_frames, chunk_frames), start=1):
         chunk_max_frames = min(chunk_frames, total_frames - start_frame)
         chunk_suffix = f"{run_suffix}_chunk_{chunk_index:03d}"
+        processed_frames_before_chunk = processed_frames
+
+        def chunk_progress(local_payload):
+            if progress_callback is None:
+                return
+
+            local_progress = float(local_payload.get("progress", 0.0))
+            local_processed_frames = local_payload.get("processed_frames")
+            if local_processed_frames is None:
+                local_processed_frames = int(round(chunk_max_frames * local_progress))
+            overall_processed_frames = min(
+                processed_frames_before_chunk + int(local_processed_frames),
+                total_frames,
+            )
+            progress_callback(
+                {
+                    "progress": min(overall_processed_frames / total_frames, 0.999),
+                    "progress_message": (
+                        f"Chunk {chunk_index} of {total_chunks}: "
+                        f"{local_payload.get('progress_message', 'Processing')}"
+                    ),
+                    "processed_chunks": chunk_index - 1,
+                    "total_chunks": total_chunks,
+                    "processed_frames": overall_processed_frames,
+                    "total_frames": total_frames,
+                    "partial_outputs": list(chunk_outputs),
+                }
+            )
+
         chunk_result = run_analysis(
             input_source,
             player_model=player_model,
@@ -368,6 +429,7 @@ def run_chunked_full_analysis(
             max_frames=chunk_max_frames,
             start_frame=start_frame,
             run_suffix=chunk_suffix,
+            progress_callback=chunk_progress,
         )
         chunk_results.append(chunk_result)
         processed_frames += chunk_result.processed_frames

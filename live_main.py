@@ -6,7 +6,7 @@ from threading import Lock
 from time import time
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -242,6 +242,7 @@ def run_job(job_id):
                 max_frames=profile_config["max_frames"],
                 run_suffix=profile_config["run_suffix"],
                 court_keypoint_interval=profile_config.get("court_keypoint_interval", 12),
+                progress_callback=lambda payload: update_job_progress(job_id, payload),
             )
     except Exception as exc:
         with JOB_LOCK:
@@ -569,6 +570,13 @@ def get_job_status(job_id: str):
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/favicon.ico")
+@app.get("/apple-touch-icon.png")
+@app.get("/apple-touch-icon-precomposed.png")
+def quiet_browser_icon_requests():
+    return Response(status_code=204)
 
 
 if __name__ == "__main__":
