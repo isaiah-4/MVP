@@ -6,6 +6,7 @@ class TacticalViewAnnotations:
     def __init__(self, court_projector, team_colors):
         self.court_projector = court_projector
         self.team_colors = team_colors
+        self._court_template = court_projector.create_tactical_court()
 
     def annotations(
         self,
@@ -16,10 +17,11 @@ class TacticalViewAnnotations:
         possession_data,
     ):
         output_video_frames = []
+        keypoint_template = self._draw_tactical_keypoints(self._court_template.copy())
 
         for frame_num, frame in enumerate(video_frames):
             frame = frame.copy()
-            tactical_frame = self.court_projector.create_tactical_court()
+            tactical_frame = keypoint_template.copy()
             frame_positions = player_positions_m[frame_num]
             frame_assignment = team_assignments[frame_num]
             holder_id = possession_data["player"][frame_num]
@@ -40,7 +42,6 @@ class TacticalViewAnnotations:
                 cv2.circle(tactical_frame, (ball_x, ball_y), 5, (0, 250, 0), -1)
                 cv2.circle(tactical_frame, (ball_x, ball_y), 7, (0, 0, 0), 1)
 
-            tactical_frame = self._draw_tactical_keypoints(tactical_frame)
             combined_frame = self._append_panel(frame, tactical_frame)
             output_video_frames.append(combined_frame)
 
