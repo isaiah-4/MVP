@@ -65,9 +65,9 @@ class ShotDetector:
         previous_ball_center = None
 
         for frame_num in range(frame_count):
-            current_holder = int(possession_data["player"][frame_num])
+            current_holder = possession_data["player"][frame_num]
             current_team = int(possession_data["team"][frame_num])
-            raw_holder = int(possession_data["raw_player"][frame_num])
+            raw_holder = possession_data["raw_player"][frame_num]
             ball_bbox = self._get_bbox(ball_tracks[frame_num])
             hoop_bbox = self._get_bbox(hoop_tracks[frame_num])
             ball_center = (
@@ -195,7 +195,7 @@ class ShotDetector:
             "frame_num": int(frame_num),
             "release_frame": int(candidate["release_frame"]),
             "result": result,
-            "shooter_id": int(candidate["shooter_id"]),
+            "shooter_id": candidate["shooter_id"],
             "team_id": int(candidate["team_id"]),
             "shot_position_m": shot_position_m,
         }

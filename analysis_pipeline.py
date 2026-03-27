@@ -25,10 +25,15 @@ from utils import (
     concatenate_videos,
     get_video_fps,
     get_video_frame_count,
+    normalize_player_track_ids_by_team,
     prepare_video_source,
     read_vid,
     save_vid,
+    sort_player_identifier,
 )
+
+
+RESULT_CACHE_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,7 @@ class AnalysisRunResult:
 
     def to_public_dict(self):
         return {
+            "cache_version": RESULT_CACHE_VERSION,
             "source_key": self.source_key,
             "base_source_key": self.base_source_key,
             "input_path": str(self.input_path),
@@ -181,12 +187,12 @@ def run_analysis(
     player_tracker_model = PlayerTracker(player_model)
     ball_tracker_model = ballTracker(ball_model)
 
-    player_tracks = player_tracker_model.get_object_tracks(
+    raw_player_tracks = player_tracker_model.get_object_tracks(
         video_frames,
         read_from_stub=use_stubs,
         stub_path=str(video_run.player_stub_path),
     )
-    emit_progress(0.22, "Detected players")
+    emit_progress(0.2, "Detected players")
 
     ball_tracks, hoop_tracks = ball_tracker_model.get_tracks(
         video_frames,
@@ -199,7 +205,13 @@ def run_analysis(
     emit_progress(0.38, "Detected ball and hoop")
 
     team_assigner = TeamAssigner()
-    team_assignments = team_assigner.assign_teams(video_frames, player_tracks)
+    raw_team_assignments = team_assigner.assign_teams(video_frames, raw_player_tracks)
+    player_tracks, team_assignments = normalize_player_track_ids_by_team(
+        raw_player_tracks,
+        raw_team_assignments,
+        team_colors=team_assigner.team_colors,
+        max_players_per_team=5,
+    )
     emit_progress(0.48, "Assigned teams")
 
     possession_analyzer = BallPossessionAnalyzer()
@@ -535,6 +547,8 @@ def load_cached_result(
     except (OSError, json.JSONDecodeError):
         return None
 
+    if int(payload.get("cache_version", 0)) != RESULT_CACHE_VERSION:
+        return None
     if payload.get("court_model_path") != court_model:
         return None
     if payload.get("player_model_path") != player_model:
@@ -586,7 +600,7 @@ def combine_chunk_session_metrics(chunk_results):
 
         for row in metrics.get("players", []):
             prefixed_row = dict(row)
-            prefixed_row["player_id"] = f"C{chunk_index}-P{row['player_id']}"
+            prefixed_row["player_id"] = f"C{chunk_index}-{row['player_id']}"
             prefixed_row["chunk_index"] = chunk_index
             player_rows.append(prefixed_row)
             total_touches += int(row.get("touches", 0))
@@ -607,8 +621,8 @@ def combine_chunk_session_metrics(chunk_results):
         for event in metrics.get("shots", []):
             prefixed_event = dict(event)
             shooter_id = event.get("shooter_id", -1)
-            if shooter_id != -1:
-                prefixed_event["shooter_id"] = f"C{chunk_index}-P{shooter_id}"
+            if shooter_id not in (-1, None, ""):
+                prefixed_event["shooter_id"] = f"C{chunk_index}-{shooter_id}"
             prefixed_event["chunk_index"] = chunk_index
             prefixed_event["frame_num"] = int(chunk_result.start_frame) + int(
                 event.get("frame_num", 0)
@@ -619,7 +633,12 @@ def combine_chunk_session_metrics(chunk_results):
             shot_events.append(prefixed_event)
 
     player_rows.sort(
-        key=lambda row: (-int(row["touches"]), -int(row["tracked_frames"]), str(row["player_id"]))
+        key=lambda row: (
+            -int(row["touches"]),
+            -int(row["tracked_frames"]),
+            sort_player_identifier(row["player_id"]),
+            str(row["player_id"]),
+        )
     )
 
     team_rows = [

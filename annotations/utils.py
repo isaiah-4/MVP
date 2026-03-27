@@ -39,8 +39,7 @@ def draw_ellipse(frame, bbox, color, tracker_id=None):
         lineType=cv2.LINE_4,
     )
 
-
-    rectangle_Width=40
+    rectangle_Width = 40
     rectangle_Height=20
     x1_rect = x_center - rectangle_Width//2
     x2_rect = x_center + rectangle_Width//2
@@ -48,6 +47,17 @@ def draw_ellipse(frame, bbox, color, tracker_id=None):
     y2_rect = (y2 + rectangle_Height//2) + 15
 
     if tracker_id is not None:
+        tracker_text = str(tracker_id)
+        text_size, _ = cv2.getTextSize(
+            tracker_text,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            2,
+        )
+        rectangle_Width = max(40, text_size[0] + 18)
+        x1_rect = x_center - rectangle_Width // 2
+        x2_rect = x_center + rectangle_Width // 2
+
         cv2.rectangle(
             frame,
             (int(x1_rect), int(y1_rect)), 
@@ -55,14 +65,12 @@ def draw_ellipse(frame, bbox, color, tracker_id=None):
             color,
             cv2.FILLED
             )
-        
-        x1_text = x1_rect + 12
-        if tracker_id >= 99:
-            x1_text -= 10
-        
+
+        x1_text = x_center - (text_size[0] // 2)
+
         cv2.putText(
             frame, 
-            str(tracker_id),
+            tracker_text,
             (int(x1_text), int(y2_rect - 5)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,

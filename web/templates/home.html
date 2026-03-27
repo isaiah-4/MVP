@@ -52,7 +52,7 @@
                     <label class="mode-card">
                         <input type="radio" name="mode" value="game" {% if form.mode == "game" %}checked{% endif %}>
                         <span class="mode-title">Game</span>
-                        <span class="mode-copy">Game flow using tracker IDs for everyone on the floor.</span>
+                        <span class="mode-copy">Game flow using team-scoped player labels like T1-1 and T2-2.</span>
                     </label>
                 </div>
                 <label id="player-id-row" class="{% if form.mode != 'workout' %}is-hidden{% endif %}">

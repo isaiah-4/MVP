@@ -11,7 +11,12 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from analysis_pipeline import AnalysisRunResult, run_analysis, run_chunked_full_analysis
+from analysis_pipeline import (
+    AnalysisRunResult,
+    RESULT_CACHE_VERSION,
+    run_analysis,
+    run_chunked_full_analysis,
+)
 from utils.input_utils import extract_youtube_id, is_youtube_url
 
 
@@ -89,7 +94,7 @@ def build_home_context(request, **overrides):
         },
         "available_now": [
             "Processed feed with player, ball, court, and tactical overlays",
-            "Auto track IDs for everyone on the floor",
+            "Auto player labels for everyone on the floor",
             "Touch counts from confirmed ball possession changes",
             "Average possession time per tracked player",
             "Team pass and interception counts",
@@ -98,7 +103,7 @@ def build_home_context(request, **overrides):
         "coming_next": [
             "Shot chart and hot zone views from detected attempt locations",
             "Clip review and side-by-side comparisons",
-            "Real player identity matching instead of tracker IDs",
+            "Real player identity matching instead of team-scoped player labels",
             "AI review and form feedback",
         ],
     }
@@ -114,7 +119,7 @@ def get_analysis_profile_config(analysis_profile):
 
 def normalize_input_key(input_source, analysis_profile):
     source = input_source.strip()
-    profile_key = f"profile:{analysis_profile}"
+    profile_key = f"profile:{analysis_profile}:analysis:{RESULT_CACHE_VERSION}"
     if is_youtube_url(source):
         video_id = extract_youtube_id(source)
         if video_id is not None:

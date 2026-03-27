@@ -81,12 +81,12 @@
                     <li>This run is a preview, so the dashboard reflects only the first {{ max_frames }} frames.</li>
                     {% endif %}
                     {% if player_ids_are_chunk_local %}
-                    <li>This full run was processed in chunks, so player IDs below are chunk-local until cross-chunk identity matching is added.</li>
+                    <li>This full run was processed in chunks, so player labels below are chunk-local until cross-chunk identity matching is added.</li>
                     <li>Touch, pass, and interception totals can drift slightly at chunk boundaries until possession state is carried across chunks.</li>
                     {% endif %}
                     <li>Shot attempts and makes/misses are now heuristic detections based on release plus ball-to-hoop motion, so edge cases will still happen.</li>
                     <li>Shot chart and hot zones are the next layer on top of these detected events and projected shot locations.</li>
-                    <li>Workout player labels are captured in the session, but true identity matching is still future work.</li>
+                    <li>Player labels are normalized into team-scoped slots like T1-1 and T2-3, but true identity matching across long occlusions is still future work.</li>
                     <li>Clip review, AI coaching, and 3D body analysis are still roadmap items.</li>
                 </ul>
             </article>
@@ -96,12 +96,12 @@
             <article class="table-card">
                 <div class="section-head">
                     <h2>Player Possession Stats</h2>
-                    <span>{% if player_ids_are_chunk_local %}Chunk-local tracker IDs{% else %}Tracker IDs for this session{% endif %}</span>
+                    <span>{% if player_ids_are_chunk_local %}Chunk-local player labels{% else %}Session player labels{% endif %}</span>
                 </div>
                 <table>
                     <thead>
                         <tr>
-                            <th>Player ID</th>
+                            <th>Player</th>
                             <th>Team</th>
                             <th>Tracked Frames</th>
                             <th>Touches</th>

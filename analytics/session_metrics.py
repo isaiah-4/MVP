@@ -1,5 +1,7 @@
 from collections import Counter
 
+from utils import sort_player_identifier
+
 
 class SessionMetricsBuilder:
     def __init__(self, fps):
@@ -79,11 +81,11 @@ class SessionMetricsBuilder:
         total_made_shots = 0
 
         for event in shot_data.get("events", []):
-            shooter_id = int(event.get("shooter_id", -1))
+            shooter_id = event.get("shooter_id", -1)
             team_id = int(event.get("team_id", -1))
             is_make = event.get("result") == "made"
 
-            if shooter_id != -1:
+            if shooter_id not in (-1, None, ""):
                 player_entry = self._get_player_entry(
                     player_metrics,
                     shooter_id,
@@ -114,7 +116,7 @@ class SessionMetricsBuilder:
                 field_goal_percentage = (made_shots / shot_attempts) * 100.0
 
             row = {
-                "player_id": int(player_id),
+                "player_id": player_id,
                 "team_id": int(metrics["team_id"]),
                 "tracked_frames": int(metrics["tracked_frames"]),
                 "touches": int(metrics["touches"]),
@@ -131,7 +133,12 @@ class SessionMetricsBuilder:
             total_possession_frames += metrics["possession_frames"]
 
         player_rows.sort(
-            key=lambda row: (-row["touches"], -row["tracked_frames"], row["player_id"])
+            key=lambda row: (
+                -row["touches"],
+                -row["tracked_frames"],
+                sort_player_identifier(row["player_id"]),
+                str(row["player_id"]),
+            )
         )
 
         latest_passes = {}
@@ -206,7 +213,7 @@ class SessionMetricsBuilder:
                     "frame_num": int(event.get("frame_num", 0)),
                     "release_frame": int(event.get("release_frame", 0)),
                     "result": event.get("result", "missed"),
-                    "shooter_id": int(event.get("shooter_id", -1)),
+                    "shooter_id": event.get("shooter_id", -1),
                     "team_id": int(event.get("team_id", -1)),
                     "shot_position_m": event.get("shot_position_m"),
                 }
