@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from threading import Lock
 
 import cv2
 import numpy as np
@@ -17,6 +18,10 @@ from utils.player_id_utils import build_player_label
 
 UNKNOWN_SCOPE = "U"
 JERSEY_NUMBER_PATTERN = re.compile(r"\b(\d{1,2})\b")
+NON_DIGIT_PATTERN = re.compile(r"\D+")
+_MISSING = object()
+_TROCR_BACKEND_CACHE = {}
+_TROCR_BACKEND_CACHE_LOCK = Lock()
 
 
 class PlayerIdentityResolver:
@@ -36,9 +41,18 @@ class PlayerIdentityResolver:
         self.min_merge_similarity = float(min_merge_similarity)
         self._tesseract_path = shutil.which("tesseract")
         self._ocr_enabled = (
-            self._tesseract_path is not None
-            and os.environ.get("COURTVISION_ENABLE_JERSEY_OCR", "1").strip() not in {"0", "false", "False"}
+            os.environ.get("COURTVISION_ENABLE_JERSEY_OCR", "1").strip() not in {"0", "false", "False"}
+            and (
+                self._tesseract_path is not None
+                or _transformers_ocr_available()
+            )
         )
+        (
+            self._ocr_backend,
+            self._ocr_fallback_backend,
+            self._trocr_model_id,
+            self._trocr_device,
+        ) = self._resolve_ocr_backends()
 
     def resolve(
         self,
@@ -139,7 +153,10 @@ class PlayerIdentityResolver:
                     profile["embeddings"].append(embedding)
 
                 if sample_index < self.max_ocr_samples_per_track:
-                    jersey_number = self._read_jersey_number(sample["ocr_crop"])
+                    jersey_number = self._read_jersey_number(
+                        sample["ocr_crop"],
+                        trocr_crop=sample.get("trocr_crop"),
+                    )
                     if jersey_number is not None:
                         profile["ocr_votes"][jersey_number] += 1
 
@@ -168,6 +185,7 @@ class PlayerIdentityResolver:
             appearance_crop = full_crop
 
         ocr_crop = _prepare_ocr_crop(appearance_crop)
+        trocr_crop = _prepare_trocr_crop(appearance_crop)
         center_x = (float(bbox[0]) + float(bbox[2])) / 2.0
         center_y = (float(bbox[1]) + float(bbox[3])) / 2.0
         area = max(float((float(bbox[2]) - float(bbox[0])) * (float(bbox[3]) - float(bbox[1]))), 0.0)
@@ -181,6 +199,7 @@ class PlayerIdentityResolver:
             "score": float(score),
             "appearance_crop": appearance_crop,
             "ocr_crop": ocr_crop,
+            "trocr_crop": trocr_crop,
         }
 
     def _compute_appearance_embedding(self, crop):
@@ -198,8 +217,23 @@ class PlayerIdentityResolver:
         hist = hist.flatten().astype(np.float32)
         return _normalize_vector(hist)
 
-    def _read_jersey_number(self, crop):
-        if not self._ocr_enabled or crop is None or crop.size == 0:
+    def _read_jersey_number(self, crop, *, trocr_crop=None):
+        if not self._ocr_enabled:
+            return None
+
+        if self._ocr_backend == "trocr":
+            trocr_candidate_crop = trocr_crop if trocr_crop is not None else crop
+            jersey_number = self._read_jersey_number_trocr(trocr_candidate_crop)
+            if jersey_number is not None:
+                return jersey_number
+
+        if self._ocr_backend == "tesseract" or self._ocr_fallback_backend == "tesseract":
+            return self._read_jersey_number_tesseract(crop)
+
+        return None
+
+    def _read_jersey_number_tesseract(self, crop):
+        if crop is None or crop.size == 0:
             return None
         if crop.shape[0] < self.min_crop_height_for_ocr:
             return None
@@ -218,6 +252,18 @@ class PlayerIdentityResolver:
 
         number, _ = Counter(candidates).most_common(1)[0]
         return number
+
+    def _read_jersey_number_trocr(self, crop):
+        if crop is None or crop.size == 0:
+            return None
+        if crop.shape[0] < self.min_crop_height_for_ocr:
+            return None
+
+        backend = _get_trocr_backend(self._trocr_model_id, self._trocr_device)
+        if backend is None:
+            return None
+
+        return backend.read_digits(crop)
 
     def _resolve_jersey_number(self, votes):
         if not votes:
@@ -453,7 +499,7 @@ class PlayerIdentityResolver:
 
         return {
             "appearance_backend": "color_histogram",
-            "ocr_backend": "tesseract" if self._ocr_enabled else "none",
+            "ocr_backend": self._describe_ocr_backend(),
             "resolved_players": len(players),
             "players_with_numbers": int(players_with_numbers),
             "primary_identity": primary_identity,
@@ -464,7 +510,7 @@ class PlayerIdentityResolver:
     def _build_empty_identity_data(self):
         return {
             "appearance_backend": "color_histogram",
-            "ocr_backend": "tesseract" if self._ocr_enabled else "none",
+            "ocr_backend": self._describe_ocr_backend(),
             "resolved_players": 0,
             "players_with_numbers": 0,
             "primary_identity": None,
@@ -483,6 +529,49 @@ class PlayerIdentityResolver:
         if int(team_id) in (1, 2):
             return int(team_id)
         return UNKNOWN_SCOPE
+
+    def _resolve_ocr_backends(self):
+        if not self._ocr_enabled:
+            return "none", "none", "", "cpu"
+
+        requested_backend = os.environ.get("COURTVISION_JERSEY_OCR_BACKEND", "auto").strip().lower() or "auto"
+        trocr_model_id = os.environ.get(
+            "COURTVISION_TROCR_MODEL_ID",
+            "microsoft/trocr-base-printed",
+        ).strip() or "microsoft/trocr-base-printed"
+        trocr_device = _get_torch_inference_device()
+        trocr_available = _transformers_ocr_available()
+        tesseract_available = self._tesseract_path is not None
+
+        if requested_backend == "none":
+            return "none", "none", trocr_model_id, trocr_device
+
+        if requested_backend == "trocr":
+            if trocr_available:
+                fallback = "tesseract" if tesseract_available else "none"
+                return "trocr", fallback, trocr_model_id, trocr_device
+            if tesseract_available:
+                return "tesseract", "none", trocr_model_id, trocr_device
+            return "none", "none", trocr_model_id, trocr_device
+
+        if requested_backend == "tesseract":
+            if tesseract_available:
+                return "tesseract", "none", trocr_model_id, trocr_device
+            if trocr_available:
+                return "trocr", "none", trocr_model_id, trocr_device
+            return "none", "none", trocr_model_id, trocr_device
+
+        if trocr_available:
+            fallback = "tesseract" if tesseract_available else "none"
+            return "trocr", fallback, trocr_model_id, trocr_device
+        if tesseract_available:
+            return "tesseract", "none", trocr_model_id, trocr_device
+        return "none", "none", trocr_model_id, trocr_device
+
+    def _describe_ocr_backend(self):
+        if self._ocr_backend == "trocr":
+            return f"trocr:{self._trocr_model_id}"
+        return self._ocr_backend
 
 
 def _crop_bbox(frame, bbox):
@@ -532,6 +621,29 @@ def _prepare_ocr_crop(crop):
     return binary
 
 
+def _prepare_trocr_crop(crop):
+    if crop is None or crop.size == 0:
+        return None
+
+    enlarged = cv2.resize(
+        crop,
+        None,
+        fx=3.0,
+        fy=3.0,
+        interpolation=cv2.INTER_CUBIC,
+    )
+
+    if len(enlarged.shape) != 3 or enlarged.shape[2] != 3:
+        return enlarged
+
+    lab = cv2.cvtColor(enlarged, cv2.COLOR_BGR2LAB)
+    lightness, channel_a, channel_b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced_lightness = clahe.apply(lightness)
+    enhanced = cv2.merge([enhanced_lightness, channel_a, channel_b])
+    return cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+
+
 def _run_tesseract_digits(tesseract_path, image_path, *, psm):
     try:
         process = subprocess.run(
@@ -565,6 +677,100 @@ def _run_tesseract_digits(tesseract_path, image_path, *, psm):
     if value > 99:
         return None
     return f"{value}"
+
+
+def _transformers_ocr_available():
+    try:
+        from PIL import Image  # noqa: F401
+        from transformers import TrOCRProcessor, VisionEncoderDecoderModel  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _get_torch_inference_device():
+    try:
+        import torch
+    except Exception:
+        return "cpu"
+
+    env_device = os.environ.get("COURTVISION_INFERENCE_DEVICE")
+    if env_device:
+        return env_device
+
+    if torch.cuda.is_available():
+        return "cuda"
+
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend is not None and mps_backend.is_available():
+        return "mps"
+
+    return "cpu"
+
+
+def _get_trocr_backend(model_id, device):
+    cache_key = (str(model_id), str(device))
+
+    with _TROCR_BACKEND_CACHE_LOCK:
+        cached_backend = _TROCR_BACKEND_CACHE.get(cache_key, _MISSING)
+        if cached_backend is False:
+            return None
+        if cached_backend is not _MISSING:
+            return cached_backend
+
+    try:
+        backend = _TrOCRDigitsBackend(model_id, device)
+    except Exception:
+        backend = False
+
+    with _TROCR_BACKEND_CACHE_LOCK:
+        _TROCR_BACKEND_CACHE[cache_key] = backend
+
+    if backend is False:
+        return None
+    return backend
+
+
+class _TrOCRDigitsBackend:
+    def __init__(self, model_id, device):
+        import torch
+        from PIL import Image
+        from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+
+        self._torch = torch
+        self._image = Image
+        self._model_id = str(model_id)
+        self._device = str(device)
+        self._processor = TrOCRProcessor.from_pretrained(self._model_id)
+        self._model = VisionEncoderDecoderModel.from_pretrained(self._model_id)
+        self._model.to(self._device)
+        self._model.eval()
+        self._predict_lock = Lock()
+
+    def read_digits(self, crop):
+        if crop is None or crop.size == 0:
+            return None
+
+        if len(crop.shape) == 2:
+            rgb_crop = cv2.cvtColor(crop, cv2.COLOR_GRAY2RGB)
+        else:
+            rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+
+        image = self._image.fromarray(rgb_crop)
+        model_inputs = self._processor(image, return_tensors="pt")
+        pixel_values = model_inputs.pixel_values.to(self._device)
+
+        with self._predict_lock, self._torch.inference_mode():
+            generated_ids = self._model.generate(
+                pixel_values,
+                max_new_tokens=4,
+            )
+
+        decoded_text = self._processor.batch_decode(
+            generated_ids,
+            skip_special_tokens=True,
+        )[0]
+        return _normalize_ocr_number(decoded_text)
 
 
 def _normalize_vector(vector):
@@ -614,3 +820,22 @@ def _scope_sort_key(scope):
     if scope == UNKNOWN_SCOPE:
         return 99
     return int(scope)
+
+
+def _normalize_ocr_number(raw_text):
+    if raw_text is None:
+        return None
+
+    digits_only = NON_DIGIT_PATTERN.sub("", str(raw_text))
+    if not digits_only:
+        return None
+
+    digits_only = digits_only[:2]
+    normalized = digits_only.lstrip("0") or "0"
+    if not normalized.isdigit():
+        return None
+
+    value = int(normalized)
+    if value > 99:
+        return None
+    return str(value)
