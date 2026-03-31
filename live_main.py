@@ -97,7 +97,7 @@ def build_home_context(request, **overrides):
         },
         "available_now": [
             "Processed feed with player, ball, court, and tactical overlays",
-            "Team-scoped player labels with appearance-based identity cleanup",
+            "Team-scoped player labels with appearance-based identity cleanup and optional TrOCR jersey OCR",
             "Touch counts from confirmed ball possession changes",
             "Average possession time per tracked player",
             "Team pass and interception counts",
@@ -106,7 +106,7 @@ def build_home_context(request, **overrides):
         "coming_next": [
             "Shot chart and hot zone views from detected attempt locations",
             "Clip review and side-by-side comparisons",
-            "Stronger trained ReID and jersey-number models instead of the current fallback identity layer",
+            "Stronger sports ReID beyond the current appearance-based identity layer",
             "AI review and form feedback",
         ],
     }

@@ -30,7 +30,7 @@ from utils import (
 )
 
 
-RESULT_CACHE_VERSION = 6
+RESULT_CACHE_VERSION = 7
 
 
 @dataclass(frozen=True)
