@@ -78,7 +78,9 @@ class CourtKeypointDetector:
                 continue
             if not np.isfinite(confidence) or confidence < self.keypoint_confidence:
                 continue
-            if point_x <= 0 or point_y <= 0:
+            if point_x < 0 or point_y < 0:
+                continue
+            if point_x == 0 and point_y == 0:
                 continue
 
             frame_keypoints[keypoint_id] = (point_x, point_y)

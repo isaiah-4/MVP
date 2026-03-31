@@ -1,3 +1,4 @@
+import numpy as np
 import supervision as sv
 from utils import save_stub, read_stub
 from .model_store import get_yolo_model
@@ -17,27 +18,39 @@ class PlayerTracker:
         return detections
         
     def get_object_tracks(self, frames, read_from_stub=False, stub_path=None):
-        
         tracker = read_stub(read_from_stub, stub_path)
         if tracker is not None:
             if len(tracker) == len(frames):
                 return tracker
-        
+
+        self.tracker.reset()
         detections = self.detect_frames(frames)
         tracker = []
+        if not detections:
+            save_stub(stub_path, tracker)
+            return tracker
 
-        for frame_num,detection in enumerate(detections):
-            cls_names = detection.names
-            player_class_ids = {
-                class_id
-                for class_id, class_name in cls_names.items()
-                if any(token in class_name.lower() for token in ("human", "player"))
-            }
+        cls_names = detections[0].names
+        player_class_ids = {
+            int(class_id)
+            for class_id, class_name in cls_names.items()
+            if any(token in class_name.lower() for token in ("human", "player"))
+        }
+        player_class_id_array = np.asarray(sorted(player_class_ids), dtype=int)
 
-
+        for frame_num, detection in enumerate(detections):
             detections_supervision = sv.Detections.from_ultralytics(detection)
+            if detections_supervision.class_id is not None:
+                if player_class_id_array.size > 0:
+                    player_mask = np.isin(
+                        detections_supervision.class_id.astype(int),
+                        player_class_id_array,
+                    )
+                else:
+                    player_mask = np.zeros(len(detections_supervision), dtype=bool)
+                detections_supervision = detections_supervision[player_mask]
 
-            detections_with_tracker= self.tracker.update_with_detections(detections_supervision)
+            detections_with_tracker = self.tracker.update_with_detections(detections_supervision)
 
             tracker.append({})
 

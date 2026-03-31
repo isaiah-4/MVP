@@ -4,3 +4,4 @@ from .court_keypoint_annotations import CourtKeypointAnnotations
 from .pass_interception_annotations import PassInterceptionAnnotations
 from .speed_distance_annotations import SpeedDistanceAnnotations
 from .tactical_view_annotations import TacticalViewAnnotations
+from .composer import render_all_annotations

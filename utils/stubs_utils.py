@@ -16,7 +16,10 @@ def save_stub(stub_path, object):
 
 def read_stub(read_from_stub, stub_path):
     if read_from_stub and stub_path is not None and os.path.exists(stub_path):
-        with open(stub_path, 'rb') as f:
-            object = pickle.load(f)
-            return object 
+        try:
+            with open(stub_path, 'rb') as f:
+                object = pickle.load(f)
+                return object
+        except Exception:
+            return None
     return None

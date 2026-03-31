@@ -15,12 +15,13 @@ class TacticalViewAnnotations:
         ball_positions_m,
         team_assignments,
         possession_data,
+        copy_frames=True,
     ):
         output_video_frames = []
         keypoint_template = self._draw_tactical_keypoints(self._court_template.copy())
 
         for frame_num, frame in enumerate(video_frames):
-            frame = frame.copy()
+            frame = frame.copy() if copy_frames else frame
             tactical_frame = keypoint_template.copy()
             frame_positions = player_positions_m[frame_num]
             frame_assignment = team_assignments[frame_num]

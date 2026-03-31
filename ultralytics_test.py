@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 
-model = YOLO("Models/Player_detection_model.pt")
+model = YOLO("Models/player_detector.pt")
 
 results = model.track(source="Input_vids/video_1.mp4", save=True)
 print(results)

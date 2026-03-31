@@ -7,11 +7,11 @@ class CourtKeypointAnnotations:
     def __init__(self):
         self.keypoint_color = (0, 255, 255)
 
-    def annotations(self, video_frames, court_keypoints):
-        output_video_frames = []
+    def annotations(self, video_frames, court_keypoints, copy_frames=True):
+        output_video_frames = [frame.copy() for frame in video_frames] if copy_frames else video_frames
 
         for frame_num, frame in enumerate(video_frames):
-            frame = frame.copy()
+            frame = output_video_frames[frame_num]
             frame_keypoints = court_keypoints[frame_num]
 
             for keypoint_id, point in frame_keypoints.items():
@@ -27,6 +27,6 @@ class CourtKeypointAnnotations:
                     thickness=1,
                 )
 
-            output_video_frames.append(frame)
+            output_video_frames[frame_num] = frame
 
         return output_video_frames

@@ -1,7 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+import importlib.util
 import os
 from pathlib import Path
+import shutil
 from threading import Lock
 from time import time
 from uuid import uuid4
@@ -45,6 +47,7 @@ ANALYSIS_PROFILES = {
     "preview": {
         "label": "Fast Preview",
         "run_suffix": "preview_300",
+        "max_dimension": 720,
         "max_frames": 300,
         "court_keypoint_interval": 8,
     },
@@ -139,6 +142,10 @@ def normalize_input_key(input_source, analysis_profile):
 def validate_input_source(input_source):
     source = input_source.strip()
     if is_youtube_url(source):
+        if shutil.which("yt-dlp") is None and importlib.util.find_spec("yt_dlp") is None:
+            raise RuntimeError(
+                "yt-dlp is required to analyze YouTube URLs. Install it before submitting the job."
+            )
         return
 
     source_path = Path(source).expanduser()
@@ -231,6 +238,7 @@ def run_job(job_id):
                 job.input_source,
                 run_suffix=profile_config["run_suffix"],
                 chunk_frames=profile_config.get("chunk_frames", 300),
+                max_dimension=profile_config.get("max_dimension"),
                 court_keypoint_interval=profile_config.get("court_keypoint_interval", 12),
                 progress_callback=lambda payload: update_job_progress(job_id, payload),
             )
@@ -244,6 +252,7 @@ def run_job(job_id):
             )
             result = run_analysis(
                 job.input_source,
+                max_dimension=profile_config.get("max_dimension"),
                 max_frames=profile_config["max_frames"],
                 run_suffix=profile_config["run_suffix"],
                 court_keypoint_interval=profile_config.get("court_keypoint_interval", 12),
