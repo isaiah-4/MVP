@@ -58,6 +58,10 @@
                 <span class="metric-label">Field Goal %</span>
                 <strong>{{ "%.1f"|format(metrics.overview.field_goal_percentage) }}%</strong>
             </article>
+            <article class="metric-card">
+                <span class="metric-label">Players With Numbers</span>
+                <strong>{{ metrics.identity.players_with_numbers if metrics.identity else 0 }}</strong>
+            </article>
         </section>
 
         <section class="content-grid">
@@ -86,7 +90,8 @@
                     {% endif %}
                     <li>Shot attempts and makes/misses are now heuristic detections based on release plus ball-to-hoop motion, so edge cases will still happen.</li>
                     <li>Shot chart and hot zones are the next layer on top of these detected events and projected shot locations.</li>
-                    <li>Player labels are normalized into team-scoped slots like T1-1 and T2-3, but true identity matching across long occlusions is still future work.</li>
+                    <li>Player identities now run through appearance-based tracklet resolution, with jersey OCR layered on when a readable crop is available.</li>
+                    <li>The current identity backend is still a lightweight fallback, not a trained sports ReID model.</li>
                     <li>Clip review, AI coaching, and 3D body analysis are still roadmap items.</li>
                 </ul>
             </article>
@@ -101,7 +106,10 @@
                 <table>
                     <thead>
                         <tr>
-                            <th>Player</th>
+                            <th>Identity</th>
+                            <th>Label</th>
+                            <th>Jersey</th>
+                            <th>Source</th>
                             <th>Team</th>
                             <th>Tracked Frames</th>
                             <th>Touches</th>
@@ -115,7 +123,10 @@
                     <tbody>
                         {% for row in metrics.players %}
                         <tr>
+                            <td>{{ row.display_name }}</td>
                             <td>{{ row.player_id }}</td>
+                            <td>{{ row.jersey_number or "-" }}</td>
+                            <td>{{ row.identity_source }}</td>
                             <td>{% if row.team_id == -1 %}-{% else %}{{ row.team_id }}{% endif %}</td>
                             <td>{{ row.tracked_frames }}</td>
                             <td>{{ row.touches }}</td>
@@ -185,7 +196,7 @@
                         {% for shot in metrics.shots %}
                         <tr>
                             <td>{{ shot.frame_num }}</td>
-                            <td>{{ shot.shooter_id }}</td>
+                            <td>{{ shot.shooter_display_name or shot.shooter_id }}</td>
                             <td>{% if shot.team_id == -1 %}-{% else %}{{ shot.team_id }}{% endif %}</td>
                             <td>{{ shot.result }}</td>
                             <td>

@@ -39,6 +39,17 @@ def parse_args():
         default=None,
         help="Optionally cap the longest frame side before analysis.",
     )
+    parser.add_argument(
+        "--mode",
+        default="game",
+        choices=("game", "workout"),
+        help="Session mode for identity handling.",
+    )
+    parser.add_argument(
+        "--player-id",
+        default="",
+        help="Optional workout player number or label hint.",
+    )
     return parser.parse_args()
 
 
@@ -50,6 +61,8 @@ def main():
         ball_model=args.ball_model,
         court_model=args.court_model,
         max_dimension=args.max_dimension,
+        mode=args.mode,
+        workout_player_id=args.player_id,
         use_stubs=not args.no_stubs,
     )
     print(f"Output saved to {result.output_path}")

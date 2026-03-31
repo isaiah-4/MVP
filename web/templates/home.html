@@ -47,16 +47,16 @@
                     <label class="mode-card">
                         <input type="radio" name="mode" value="workout" {% if form.mode == "workout" %}checked{% endif %}>
                         <span class="mode-title">Workout</span>
-                        <span class="mode-copy">Manual workout flow with a player label captured in session metadata.</span>
+                        <span class="mode-copy">Workout flow with a player number hint that anchors the primary tracked identity.</span>
                     </label>
                     <label class="mode-card">
                         <input type="radio" name="mode" value="game" {% if form.mode == "game" %}checked{% endif %}>
                         <span class="mode-title">Game</span>
-                        <span class="mode-copy">Game flow using team-scoped player labels like T1-1 and T2-2.</span>
+                        <span class="mode-copy">Game flow using team slots plus appearance-based identity cleanup and jersey OCR when available.</span>
                     </label>
                 </div>
                 <label id="player-id-row" class="{% if form.mode != 'workout' %}is-hidden{% endif %}">
-                    <span>Workout Player Label</span>
+                    <span>Workout Player Number</span>
                     <input type="text" name="player_id" value="{{ form.player_id }}" placeholder="Example: 12">
                 </label>
                 <button class="primary-button" type="submit">Run Session</button>
