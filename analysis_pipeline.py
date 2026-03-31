@@ -7,6 +7,7 @@ from analytics import (
     BallPossessionAnalyzer,
     CourtProjector,
     PassInterceptionDetector,
+    PlayerIdentityResolver,
     SessionMetricsBuilder,
     ShotDetector,
     SpeedDistanceCalculator,
@@ -24,11 +25,12 @@ from utils import (
     prepare_video_source,
     read_vid,
     save_vid,
+    sanitize_name,
     sort_player_identifier,
 )
 
 
-RESULT_CACHE_VERSION = 5
+RESULT_CACHE_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,8 @@ class AnalysisRunResult:
     using_court_model: bool
     court_model_path: str
     court_keypoint_interval: int
+    mode: str
+    workout_player_id: str
     chunk_frames: int | None
     max_dimension: int | None
     max_frames: int | None
@@ -67,6 +71,8 @@ class AnalysisRunResult:
             "using_court_model": self.using_court_model,
             "court_model_path": self.court_model_path,
             "court_keypoint_interval": self.court_keypoint_interval,
+            "mode": self.mode,
+            "workout_player_id": self.workout_player_id,
             "chunk_frames": self.chunk_frames,
             "max_dimension": self.max_dimension,
             "max_frames": self.max_frames,
@@ -92,6 +98,8 @@ class AnalysisRunResult:
             using_court_model=bool(payload["using_court_model"]),
             court_model_path=payload["court_model_path"],
             court_keypoint_interval=int(payload.get("court_keypoint_interval", 1)),
+            mode=str(payload.get("mode", "game")),
+            workout_player_id=str(payload.get("workout_player_id", "")),
             chunk_frames=payload.get("chunk_frames"),
             max_dimension=payload.get("max_dimension"),
             max_frames=payload.get("max_frames"),
@@ -114,14 +122,19 @@ class AnalysisRunResult:
         )
 
 
-def _build_effective_run_suffix(run_suffix, max_dimension):
-    if max_dimension is None:
-        return run_suffix
-
-    dimension_suffix = f"{int(max_dimension)}px"
+def _build_effective_run_suffix(run_suffix, max_dimension, mode, workout_player_id):
+    suffix_parts = []
     if run_suffix:
-        return f"{run_suffix}_{dimension_suffix}"
-    return dimension_suffix
+        suffix_parts.append(run_suffix)
+    if max_dimension is not None:
+        suffix_parts.append(f"{int(max_dimension)}px")
+    if mode and str(mode) != "game":
+        suffix_parts.append(str(mode))
+    if workout_player_id:
+        suffix_parts.append(sanitize_name(str(workout_player_id)))
+    if not suffix_parts:
+        return None
+    return "_".join(suffix_parts)
 
 
 def run_analysis(
@@ -131,6 +144,8 @@ def run_analysis(
     ball_model="Models/ball_detector_model.pt",
     court_model="Models/court_keypoint_detector.pt",
     court_keypoint_interval=12,
+    mode="game",
+    workout_player_id="",
     use_stubs=True,
     output_path=None,
     max_dimension=None,
@@ -139,7 +154,12 @@ def run_analysis(
     run_suffix=None,
     progress_callback=None,
 ):
-    effective_run_suffix = _build_effective_run_suffix(run_suffix, max_dimension)
+    effective_run_suffix = _build_effective_run_suffix(
+        run_suffix,
+        max_dimension,
+        mode,
+        workout_player_id,
+    )
     video_run = prepare_video_source(input_source, run_suffix=effective_run_suffix)
     resolved_output_path = Path(output_path) if output_path is not None else video_run.output_path
     cache_path = resolved_output_path.with_suffix(".json")
@@ -171,6 +191,8 @@ def run_analysis(
             ball_model=ball_model,
             court_model=court_model,
             court_keypoint_interval=court_keypoint_interval,
+            mode=mode,
+            workout_player_id=workout_player_id,
             chunk_frames=None,
             max_dimension=max_dimension,
             max_frames=max_frames,
@@ -224,7 +246,18 @@ def run_analysis(
         team_colors=team_assigner.team_colors,
         max_players_per_team=5,
     )
-    emit_progress(0.48, "Assigned teams")
+    identity_resolver = PlayerIdentityResolver()
+    identity_resolution = identity_resolver.resolve(
+        video_frames,
+        player_tracks,
+        team_assignments,
+        mode=mode,
+        workout_player_id=workout_player_id,
+    )
+    player_tracks = identity_resolution["player_tracks"]
+    team_assignments = identity_resolution["team_assignments"]
+    identity_data = identity_resolution["identity_data"]
+    emit_progress(0.48, "Assigned teams and resolved identities")
 
     possession_analyzer = BallPossessionAnalyzer()
     possession_data = possession_analyzer.detect_possession(
@@ -303,6 +336,7 @@ def run_analysis(
         possession_data,
         pass_interception_data,
         shot_data,
+        identity_data=identity_data,
     )
 
     result = AnalysisRunResult(
@@ -316,6 +350,8 @@ def run_analysis(
         using_court_model=using_court_model,
         court_model_path=court_model,
         court_keypoint_interval=int(court_keypoint_interval),
+        mode=str(mode),
+        workout_player_id=str(workout_player_id or ""),
         chunk_frames=None,
         max_dimension=None if max_dimension is None else int(max_dimension),
         max_frames=None if max_frames is None else int(max_frames),
@@ -339,6 +375,8 @@ def run_chunked_full_analysis(
     ball_model="Models/ball_detector_model.pt",
     court_model="Models/court_keypoint_detector.pt",
     court_keypoint_interval=12,
+    mode="game",
+    workout_player_id="",
     use_stubs=True,
     output_path=None,
     run_suffix="full",
@@ -349,7 +387,12 @@ def run_chunked_full_analysis(
     if int(chunk_frames) <= 0:
         raise ValueError("chunk_frames must be greater than zero.")
 
-    effective_run_suffix = _build_effective_run_suffix(run_suffix, max_dimension)
+    effective_run_suffix = _build_effective_run_suffix(
+        run_suffix,
+        max_dimension,
+        mode,
+        workout_player_id,
+    )
     video_run = prepare_video_source(input_source, run_suffix=effective_run_suffix)
     resolved_output_path = Path(output_path) if output_path is not None else video_run.output_path
     cache_path = resolved_output_path.with_suffix(".json")
@@ -363,6 +406,8 @@ def run_chunked_full_analysis(
             ball_model=ball_model,
             court_model=court_model,
             court_keypoint_interval=court_keypoint_interval,
+            mode=mode,
+            workout_player_id=workout_player_id,
             chunk_frames=chunk_frames,
             max_dimension=max_dimension,
             max_frames=None,
@@ -433,6 +478,8 @@ def run_chunked_full_analysis(
             ball_model=ball_model,
             court_model=court_model,
             court_keypoint_interval=court_keypoint_interval,
+            mode=mode,
+            workout_player_id=workout_player_id,
             use_stubs=use_stubs,
             max_dimension=max_dimension,
             max_frames=chunk_max_frames,
@@ -499,6 +546,8 @@ def run_chunked_full_analysis(
         ),
         court_model_path=court_model,
         court_keypoint_interval=int(court_keypoint_interval),
+        mode=str(mode),
+        workout_player_id=str(workout_player_id or ""),
         chunk_frames=int(chunk_frames),
         max_dimension=None if max_dimension is None else int(max_dimension),
         max_frames=None,
@@ -523,6 +572,8 @@ def load_cached_result(
     ball_model,
     court_model,
     court_keypoint_interval,
+    mode,
+    workout_player_id,
     chunk_frames,
     max_dimension,
     max_frames,
@@ -553,6 +604,10 @@ def load_cached_result(
     if payload.get("player_model_path") != player_model:
         return None
     if payload.get("ball_model_path") != ball_model:
+        return None
+    if str(payload.get("mode", "game")) != str(mode):
+        return None
+    if str(payload.get("workout_player_id", "")) != str(workout_player_id or ""):
         return None
     if int(payload.get("court_keypoint_interval", 1)) != int(court_keypoint_interval):
         return None
@@ -589,6 +644,7 @@ def combine_chunk_session_metrics(chunk_results):
     total_shot_attempts = 0
     total_made_shots = 0
     shot_events = []
+    identity_players = []
 
     for chunk_index, chunk_result in enumerate(chunk_results, start=1):
         metrics = chunk_result.session_metrics
@@ -600,10 +656,22 @@ def combine_chunk_session_metrics(chunk_results):
         for row in metrics.get("players", []):
             prefixed_row = dict(row)
             prefixed_row["player_id"] = f"C{chunk_index}-{row['player_id']}"
+            prefixed_row["display_name"] = (
+                f"C{chunk_index}-{row.get('display_name', row['player_id'])}"
+            )
             prefixed_row["chunk_index"] = chunk_index
             player_rows.append(prefixed_row)
             total_touches += int(row.get("touches", 0))
             total_possession_seconds += float(row.get("possession_seconds", 0.0))
+
+        for identity_row in metrics.get("identity", {}).get("players", []):
+            prefixed_identity = dict(identity_row)
+            prefixed_identity["player_id"] = f"C{chunk_index}-{identity_row['player_id']}"
+            prefixed_identity["display_name"] = (
+                f"C{chunk_index}-{identity_row.get('display_name', identity_row['player_id'])}"
+            )
+            prefixed_identity["chunk_index"] = chunk_index
+            identity_players.append(prefixed_identity)
 
         for row in metrics.get("teams", []):
             team_id = int(row.get("team_id", -1))
@@ -622,6 +690,9 @@ def combine_chunk_session_metrics(chunk_results):
             shooter_id = event.get("shooter_id", -1)
             if shooter_id not in (-1, None, ""):
                 prefixed_event["shooter_id"] = f"C{chunk_index}-{shooter_id}"
+            shooter_display_name = event.get("shooter_display_name")
+            if shooter_display_name not in (None, ""):
+                prefixed_event["shooter_display_name"] = f"C{chunk_index}-{shooter_display_name}"
             prefixed_event["chunk_index"] = chunk_index
             prefixed_event["frame_num"] = int(chunk_result.start_frame) + int(
                 event.get("frame_num", 0)
@@ -708,4 +779,12 @@ def combine_chunk_session_metrics(chunk_results):
         "players": player_rows,
         "teams": team_rows,
         "shots": shot_events,
+        "identity": {
+            "appearance_backend": "chunk_local",
+            "ocr_backend": "chunk_local",
+            "resolved_players": len(identity_players),
+            "players_with_numbers": sum(1 for row in identity_players if row.get("jersey_number")),
+            "primary_identity": None,
+            "players": identity_players,
+        },
     }

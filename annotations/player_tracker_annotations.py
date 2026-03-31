@@ -21,7 +21,12 @@ class PlayerTrackerAnnotations:
                 if bbox is None:
                     continue
                 player_color = player.get("team_color", self.default_player_color)
-                frame = draw_ellipse(frame, bbox, player_color, tracker_id=tracker_id)
+                frame = draw_ellipse(
+                    frame,
+                    bbox,
+                    player_color,
+                    tracker_id=player.get("display_id", tracker_id),
+                )
 
                 if player.get("has_ball"):
                     x_center, _ = get_center_of_bbox(bbox)

@@ -15,7 +15,7 @@ from .bbox_utils import (
     get_foot_position,
     point_to_bbox_distance,
 )
-from .input_utils import prepare_video_source
+from .input_utils import prepare_video_source, sanitize_name
 from .player_id_utils import (
     normalize_player_track_ids_by_team,
     sort_player_identifier,

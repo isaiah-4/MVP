@@ -97,7 +97,7 @@ def build_home_context(request, **overrides):
         },
         "available_now": [
             "Processed feed with player, ball, court, and tactical overlays",
-            "Auto player labels for everyone on the floor",
+            "Team-scoped player labels with appearance-based identity cleanup",
             "Touch counts from confirmed ball possession changes",
             "Average possession time per tracked player",
             "Team pass and interception counts",
@@ -106,7 +106,7 @@ def build_home_context(request, **overrides):
         "coming_next": [
             "Shot chart and hot zone views from detected attempt locations",
             "Clip review and side-by-side comparisons",
-            "Real player identity matching instead of team-scoped player labels",
+            "Stronger trained ReID and jersey-number models instead of the current fallback identity layer",
             "AI review and form feedback",
         ],
     }
@@ -120,9 +120,11 @@ def get_analysis_profile_config(analysis_profile):
     return ANALYSIS_PROFILES[analysis_profile]
 
 
-def normalize_input_key(input_source, analysis_profile):
+def normalize_input_key(input_source, analysis_profile, mode, player_id):
     source = input_source.strip()
-    profile_key = f"profile:{analysis_profile}:analysis:{RESULT_CACHE_VERSION}"
+    profile_key = (
+        f"profile:{analysis_profile}:mode:{mode}:player:{player_id.strip()}:analysis:{RESULT_CACHE_VERSION}"
+    )
     if is_youtube_url(source):
         video_id = extract_youtube_id(source)
         if video_id is not None:
@@ -193,7 +195,7 @@ def render_dashboard(
 def submit_or_get_job(input_source, session_name, mode, player_id, analysis_profile):
     get_analysis_profile_config(analysis_profile)
     validate_input_source(input_source)
-    cache_key = normalize_input_key(input_source, analysis_profile)
+    cache_key = normalize_input_key(input_source, analysis_profile, mode, player_id)
 
     with JOB_LOCK:
         prune_state_locked()
@@ -240,6 +242,8 @@ def run_job(job_id):
                 chunk_frames=profile_config.get("chunk_frames", 300),
                 max_dimension=profile_config.get("max_dimension"),
                 court_keypoint_interval=profile_config.get("court_keypoint_interval", 12),
+                mode=job.mode,
+                workout_player_id=job.player_id,
                 progress_callback=lambda payload: update_job_progress(job_id, payload),
             )
         else:
@@ -256,6 +260,8 @@ def run_job(job_id):
                 max_frames=profile_config["max_frames"],
                 run_suffix=profile_config["run_suffix"],
                 court_keypoint_interval=profile_config.get("court_keypoint_interval", 12),
+                mode=job.mode,
+                workout_player_id=job.player_id,
                 progress_callback=lambda payload: update_job_progress(job_id, payload),
             )
     except Exception as exc:

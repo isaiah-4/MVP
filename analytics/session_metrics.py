@@ -14,8 +14,11 @@ class SessionMetricsBuilder:
         possession_data,
         pass_interception_data,
         shot_data=None,
+        identity_data=None,
     ):
         shot_data = shot_data or {"events": []}
+        identity_data = identity_data or {"players_by_id": {}, "players": []}
+        identity_by_player = identity_data.get("players_by_id", {})
         player_metrics = {}
         team_possession_frames = Counter()
         team_shot_totals = Counter()
@@ -117,6 +120,10 @@ class SessionMetricsBuilder:
 
             row = {
                 "player_id": player_id,
+                "display_name": identity_by_player.get(player_id, {}).get("display_name", player_id),
+                "display_id": identity_by_player.get(player_id, {}).get("display_id", player_id),
+                "jersey_number": identity_by_player.get(player_id, {}).get("jersey_number"),
+                "identity_source": identity_by_player.get(player_id, {}).get("identity_source", "team_slot"),
                 "team_id": int(metrics["team_id"]),
                 "tracked_frames": int(metrics["tracked_frames"]),
                 "touches": int(metrics["touches"]),
@@ -214,11 +221,23 @@ class SessionMetricsBuilder:
                     "release_frame": int(event.get("release_frame", 0)),
                     "result": event.get("result", "missed"),
                     "shooter_id": event.get("shooter_id", -1),
+                    "shooter_display_name": identity_by_player.get(
+                        event.get("shooter_id", -1),
+                        {},
+                    ).get("display_name", event.get("shooter_id", -1)),
                     "team_id": int(event.get("team_id", -1)),
                     "shot_position_m": event.get("shot_position_m"),
                 }
                 for event in shot_data.get("events", [])
             ],
+            "identity": {
+                "appearance_backend": identity_data.get("appearance_backend", "none"),
+                "ocr_backend": identity_data.get("ocr_backend", "none"),
+                "resolved_players": int(identity_data.get("resolved_players", len(player_rows))),
+                "players_with_numbers": int(identity_data.get("players_with_numbers", 0)),
+                "primary_identity": identity_data.get("primary_identity"),
+                "players": list(identity_data.get("players", [])),
+            },
         }
 
     def _get_player_entry(self, player_metrics, player_id, team_id):
