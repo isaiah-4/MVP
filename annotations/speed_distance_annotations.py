@@ -9,11 +9,12 @@ class SpeedDistanceAnnotations:
         player_tracks,
         player_distances_per_frame,
         player_speeds_per_frame,
+        copy_frames=True,
     ):
-        output_video_frames = []
+        output_video_frames = [frame.copy() for frame in video_frames] if copy_frames else video_frames
 
         for frame_num, frame in enumerate(video_frames):
-            frame = frame.copy()
+            frame = output_video_frames[frame_num]
             frame_tracks = player_tracks[frame_num]
             frame_distances = player_distances_per_frame[frame_num]
             frame_speeds = player_speeds_per_frame[frame_num]
@@ -52,6 +53,6 @@ class SpeedDistanceAnnotations:
                         thickness=1,
                     )
 
-            output_video_frames.append(frame)
+            output_video_frames[frame_num] = frame
 
         return output_video_frames

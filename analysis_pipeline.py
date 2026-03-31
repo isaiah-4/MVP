@@ -13,12 +13,7 @@ from analytics import (
     TeamAssigner,
 )
 from annotations import (
-    BallTrackerAnnotations,
-    CourtKeypointAnnotations,
-    PassInterceptionAnnotations,
-    PlayerTrackerAnnotations,
-    SpeedDistanceAnnotations,
-    TacticalViewAnnotations,
+    render_all_annotations,
 )
 from trackers import CourtKeypointDetector, PlayerTracker, ballTracker
 from utils import (
@@ -33,7 +28,7 @@ from utils import (
 )
 
 
-RESULT_CACHE_VERSION = 3
+RESULT_CACHE_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -49,6 +44,7 @@ class AnalysisRunResult:
     court_model_path: str
     court_keypoint_interval: int
     chunk_frames: int | None
+    max_dimension: int | None
     max_frames: int | None
     start_frame: int
     processed_frames: int
@@ -72,6 +68,7 @@ class AnalysisRunResult:
             "court_model_path": self.court_model_path,
             "court_keypoint_interval": self.court_keypoint_interval,
             "chunk_frames": self.chunk_frames,
+            "max_dimension": self.max_dimension,
             "max_frames": self.max_frames,
             "start_frame": self.start_frame,
             "processed_frames": self.processed_frames,
@@ -96,6 +93,7 @@ class AnalysisRunResult:
             court_model_path=payload["court_model_path"],
             court_keypoint_interval=int(payload.get("court_keypoint_interval", 1)),
             chunk_frames=payload.get("chunk_frames"),
+            max_dimension=payload.get("max_dimension"),
             max_frames=payload.get("max_frames"),
             start_frame=int(payload.get("start_frame", 0)),
             processed_frames=int(
@@ -116,6 +114,16 @@ class AnalysisRunResult:
         )
 
 
+def _build_effective_run_suffix(run_suffix, max_dimension):
+    if max_dimension is None:
+        return run_suffix
+
+    dimension_suffix = f"{int(max_dimension)}px"
+    if run_suffix:
+        return f"{run_suffix}_{dimension_suffix}"
+    return dimension_suffix
+
+
 def run_analysis(
     input_source,
     *,
@@ -125,12 +133,14 @@ def run_analysis(
     court_keypoint_interval=12,
     use_stubs=True,
     output_path=None,
+    max_dimension=None,
     max_frames=None,
     start_frame=0,
     run_suffix=None,
     progress_callback=None,
 ):
-    video_run = prepare_video_source(input_source, run_suffix=run_suffix)
+    effective_run_suffix = _build_effective_run_suffix(run_suffix, max_dimension)
+    video_run = prepare_video_source(input_source, run_suffix=effective_run_suffix)
     resolved_output_path = Path(output_path) if output_path is not None else video_run.output_path
     cache_path = resolved_output_path.with_suffix(".json")
     resolved_start_frame = max(0, int(start_frame or 0))
@@ -162,6 +172,7 @@ def run_analysis(
             court_model=court_model,
             court_keypoint_interval=court_keypoint_interval,
             chunk_frames=None,
+            max_dimension=max_dimension,
             max_frames=max_frames,
             start_frame=resolved_start_frame,
         )
@@ -173,6 +184,7 @@ def run_analysis(
     emit_progress(0.01, "Loading video frames")
     video_frames = read_vid(
         str(video_run.input_path),
+        max_dimension=max_dimension,
         max_frames=max_frames,
         start_frame=resolved_start_frame,
     )
@@ -264,40 +276,20 @@ def run_analysis(
     )
     emit_progress(0.76, "Computed shot and movement analytics")
 
-    player_tracker_annotations = PlayerTrackerAnnotations()
-    ball_tracker_annotations = BallTrackerAnnotations()
-    court_keypoint_annotations = CourtKeypointAnnotations()
-    pass_interception_annotations = PassInterceptionAnnotations(
-        team_assigner.team_colors
-    )
-    speed_distance_annotations = SpeedDistanceAnnotations()
-    tactical_view_annotations = TacticalViewAnnotations(
-        court_projector,
-        team_assigner.team_colors,
-    )
-
-    output_video_frames = player_tracker_annotations.annotations(video_frames, player_tracks)
-    output_video_frames = ball_tracker_annotations.annotations(output_video_frames, ball_tracks)
-    output_video_frames = court_keypoint_annotations.annotations(
-        output_video_frames,
-        court_keypoints,
-    )
-    output_video_frames = pass_interception_annotations.annotations(
-        output_video_frames,
-        pass_interception_data,
-    )
-    output_video_frames = speed_distance_annotations.annotations(
-        output_video_frames,
-        player_tracks,
-        speed_distance_data["player_distances_per_frame"],
-        speed_distance_data["player_speeds_per_frame"],
-    )
-    output_video_frames = tactical_view_annotations.annotations(
-        output_video_frames,
-        projection_data["player_positions_m"],
-        projection_data["ball_positions_m"],
-        team_assignments,
-        possession_data,
+    output_video_frames = render_all_annotations(
+        video_frames,
+        player_tracks=player_tracks,
+        ball_tracks=ball_tracks,
+        court_keypoints=court_keypoints,
+        pass_interception_data=pass_interception_data,
+        player_distances_per_frame=speed_distance_data["player_distances_per_frame"],
+        player_speeds_per_frame=speed_distance_data["player_speeds_per_frame"],
+        player_positions_m=projection_data["player_positions_m"],
+        ball_positions_m=projection_data["ball_positions_m"],
+        team_assignments=team_assignments,
+        possession_data=possession_data,
+        court_projector=court_projector,
+        team_colors=team_assigner.team_colors,
     )
     emit_progress(0.9, "Rendered overlays")
 
@@ -325,6 +317,7 @@ def run_analysis(
         court_model_path=court_model,
         court_keypoint_interval=int(court_keypoint_interval),
         chunk_frames=None,
+        max_dimension=None if max_dimension is None else int(max_dimension),
         max_frames=None if max_frames is None else int(max_frames),
         start_frame=resolved_start_frame,
         processed_frames=len(video_frames),
@@ -350,12 +343,14 @@ def run_chunked_full_analysis(
     output_path=None,
     run_suffix="full",
     chunk_frames=300,
+    max_dimension=None,
     progress_callback=None,
 ):
     if int(chunk_frames) <= 0:
         raise ValueError("chunk_frames must be greater than zero.")
 
-    video_run = prepare_video_source(input_source, run_suffix=run_suffix)
+    effective_run_suffix = _build_effective_run_suffix(run_suffix, max_dimension)
+    video_run = prepare_video_source(input_source, run_suffix=effective_run_suffix)
     resolved_output_path = Path(output_path) if output_path is not None else video_run.output_path
     cache_path = resolved_output_path.with_suffix(".json")
 
@@ -369,6 +364,7 @@ def run_chunked_full_analysis(
             court_model=court_model,
             court_keypoint_interval=court_keypoint_interval,
             chunk_frames=chunk_frames,
+            max_dimension=max_dimension,
             max_frames=None,
             start_frame=0,
         )
@@ -438,6 +434,7 @@ def run_chunked_full_analysis(
             court_model=court_model,
             court_keypoint_interval=court_keypoint_interval,
             use_stubs=use_stubs,
+            max_dimension=max_dimension,
             max_frames=chunk_max_frames,
             start_frame=start_frame,
             run_suffix=chunk_suffix,
@@ -503,6 +500,7 @@ def run_chunked_full_analysis(
         court_model_path=court_model,
         court_keypoint_interval=int(court_keypoint_interval),
         chunk_frames=int(chunk_frames),
+        max_dimension=None if max_dimension is None else int(max_dimension),
         max_frames=None,
         start_frame=0,
         processed_frames=processed_frames,
@@ -526,6 +524,7 @@ def load_cached_result(
     court_model,
     court_keypoint_interval,
     chunk_frames,
+    max_dimension,
     max_frames,
     start_frame,
 ):
@@ -559,11 +558,11 @@ def load_cached_result(
         return None
     if payload.get("chunk_frames") != (None if chunk_frames is None else int(chunk_frames)):
         return None
+    if payload.get("max_dimension") != (None if max_dimension is None else int(max_dimension)):
+        return None
     if payload.get("max_frames") != (None if max_frames is None else int(max_frames)):
         return None
     if int(payload.get("start_frame", 0)) != int(start_frame):
-        return None
-    if "shots" not in payload.get("session_metrics", {}):
         return None
 
     return AnalysisRunResult.from_public_dict(payload)

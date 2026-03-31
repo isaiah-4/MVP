@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import re
 import shutil
@@ -32,12 +33,9 @@ class VideoRunPaths:
 def prepare_video_source(source: str, run_suffix: str | None = None) -> VideoRunPaths:
     project_root = Path(__file__).resolve().parent.parent
     source = source.strip()
-    base_source_key = build_source_key(source)
-    source_key = base_source_key
-    if run_suffix:
-        source_key = f"{base_source_key}_{sanitize_name(run_suffix)}"
 
     if is_youtube_url(source):
+        base_source_key = build_source_key(source)
         download_path = project_root / "Input_vids" / "downloads" / f"{base_source_key}.mp4"
         input_path = ensure_youtube_download(source, download_path)
     else:
@@ -47,6 +45,11 @@ def prepare_video_source(source: str, run_suffix: str | None = None) -> VideoRun
 
         if not input_path.exists():
             raise FileNotFoundError(f"Video file not found: {input_path}")
+        base_source_key = build_source_key(source, resolved_path=input_path)
+
+    source_key = base_source_key
+    if run_suffix:
+        source_key = f"{base_source_key}_{sanitize_name(run_suffix)}"
 
     return VideoRunPaths(
         source_key=source_key,
@@ -59,15 +62,21 @@ def prepare_video_source(source: str, run_suffix: str | None = None) -> VideoRun
     )
 
 
-def build_source_key(source: str) -> str:
+def build_source_key(source: str, resolved_path: Path | None = None) -> str:
     if is_youtube_url(source):
         video_id = extract_youtube_id(source)
         if video_id is None:
             raise ValueError(f"Could not extract a YouTube video id from: {source}")
         return video_id
 
-    source_path = Path(source)
-    return sanitize_name(source_path.stem or source_path.name or "video")
+    source_path = resolved_path if resolved_path is not None else Path(source).expanduser()
+    resolved_source_path = source_path.resolve()
+    base_name = sanitize_name(resolved_source_path.stem or resolved_source_path.name or "video")
+    path_digest = hashlib.blake2b(
+        str(resolved_source_path).encode("utf-8"),
+        digest_size=6,
+    ).hexdigest()
+    return f"{base_name}_{path_digest}"
 
 
 def ensure_youtube_download(url: str, output_path: Path) -> Path:
@@ -150,7 +159,7 @@ def finalize_downloaded_path(downloaded_path: Path | None, output_path: Path) ->
 
     if downloaded_path != output_path:
         output_path.unlink(missing_ok=True)
-        downloaded_path.rename(output_path)
+        shutil.move(str(downloaded_path), str(output_path))
 
 
 def parse_download_path(stdout: str, fallback_path: Path) -> Path | None:

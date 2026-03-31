@@ -7,15 +7,15 @@ class PassInterceptionAnnotations:
     def __init__(self, team_colors):
         self.team_colors = team_colors
 
-    def annotations(self, video_frames, pass_interception_data):
-        output_video_frames = []
+    def annotations(self, video_frames, pass_interception_data, copy_frames=True):
+        output_video_frames = [frame.copy() for frame in video_frames] if copy_frames else video_frames
 
         for frame_num, frame in enumerate(video_frames):
-            frame = frame.copy()
+            frame = output_video_frames[frame_num]
             passes = pass_interception_data["passes_per_frame"][frame_num]
             interceptions = pass_interception_data["interceptions_per_frame"][frame_num]
             frame = self._draw_scoreboard(frame, passes, interceptions)
-            output_video_frames.append(frame)
+            output_video_frames[frame_num] = frame
 
         return output_video_frames
 

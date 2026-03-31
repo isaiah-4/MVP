@@ -3,14 +3,8 @@ from collections import defaultdict
 
 class PassInterceptionDetector:
     def detect(self, possession_data):
-        team_pass_counts = {
-            1: 0,
-            2: 0,
-        }
-        team_interception_counts = {
-            1: 0,
-            2: 0,
-        }
+        team_pass_counts = defaultdict(int)
+        team_interception_counts = defaultdict(int)
         passes_per_frame = []
         interceptions_per_frame = []
         events = []

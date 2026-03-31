@@ -6,7 +6,7 @@ import cv2
 VIDEO_CODEC_CANDIDATES = ("avc1", "H264", "mp4v")
 
 
-def read_vid(video_path, max_frames=None, start_frame=0):
+def read_vid(video_path, max_frames=None, start_frame=0, max_dimension=None):
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
@@ -14,9 +14,24 @@ def read_vid(video_path, max_frames=None, start_frame=0):
     if not cap.isOpened():
         raise ValueError(f"Could not open video file: {video_path}")
 
+    if max_frames is not None and int(max_frames) <= 0:
+        cap.release()
+        raise ValueError("max_frames must be greater than zero when provided.")
+    if max_dimension is not None and int(max_dimension) <= 0:
+        cap.release()
+        raise ValueError("max_dimension must be greater than zero when provided.")
+
     start_frame = max(0, int(start_frame or 0))
     if start_frame > 0:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+    scale = None
+    if max_dimension is not None:
+        source_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        source_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        longest_side = max(source_width, source_height)
+        if longest_side > int(max_dimension):
+            scale = int(max_dimension) / float(longest_side)
 
     frames = []
     while True:
@@ -25,6 +40,14 @@ def read_vid(video_path, max_frames=None, start_frame=0):
         ret, frame = cap.read()
         if not ret:
             break
+        if scale is not None:
+            resized_width = max(1, int(round(frame.shape[1] * scale)))
+            resized_height = max(1, int(round(frame.shape[0] * scale)))
+            frame = cv2.resize(
+                frame,
+                (resized_width, resized_height),
+                interpolation=cv2.INTER_AREA,
+            )
         frames.append(frame)
     cap.release()
     return frames
