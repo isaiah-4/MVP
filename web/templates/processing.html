@@ -22,6 +22,9 @@
                 {% if player_id %}
                 <span class="status-pill">Workout label: {{ player_id }}</span>
                 {% endif %}
+                {% if account_name %}
+                <span class="status-pill">Account: {{ account_name }}</span>
+                {% endif %}
             </div>
             <p class="meta-copy">Source: {{ input_source }}</p>
             <p class="meta-copy">Job ID: {{ job_id }}</p>
