@@ -36,6 +36,11 @@ RESULT_CACHE_TTL_SECONDS = int(
 )
 MAX_COMPLETED_JOBS = int(os.environ.get("COURTVISION_MAX_COMPLETED_JOBS", "100"))
 MAX_CACHED_RESULTS = int(os.environ.get("COURTVISION_MAX_CACHED_RESULTS", "64"))
+WORKOUT_ACCOUNTS = (
+    {"id": "primary-athlete", "label": "Primary Athlete"},
+    {"id": "development-guard", "label": "Development Guard"},
+    {"id": "varsity-wing", "label": "Varsity Wing"},
+)
 
 EXECUTOR = ThreadPoolExecutor(max_workers=DEFAULT_MAX_WORKERS)
 JOB_LOCK = Lock()
@@ -69,6 +74,7 @@ class AnalysisJob:
     session_name: str
     mode: str
     player_id: str
+    account_id: str
     analysis_profile: str
     status: str = "queued"
     error: str | None = None
@@ -93,8 +99,10 @@ def build_home_context(request, **overrides):
             "mode": "game",
             "analysis_profile": "preview",
             "player_id": "",
+            "account_id": "",
             "input": "Input_vids/video_1.mp4",
         },
+        "workout_accounts": get_workout_accounts(),
         "available_now": [
             "Processed feed with player, ball, court, and tactical overlays",
             "Team-scoped player labels with appearance-based identity cleanup and optional TrOCR jersey OCR",
@@ -114,16 +122,75 @@ def build_home_context(request, **overrides):
     return context
 
 
+def build_prototype_context(request, **overrides):
+    bootstrap = {
+        "error": None,
+        "form": {
+            "session_name": "",
+            "mode": "game",
+            "analysis_profile": "preview",
+            "player_id": "",
+            "account_id": "",
+            "input": "",
+        },
+        "workout_accounts": get_workout_accounts(),
+        "analysis_profiles": [
+            {"id": profile_id, "label": profile["label"]}
+            for profile_id, profile in ANALYSIS_PROFILES.items()
+        ],
+    }
+    override_bootstrap = overrides.pop("bootstrap", None)
+    if override_bootstrap:
+        bootstrap.update(override_bootstrap)
+    return {
+        "request": request,
+        "bootstrap": bootstrap,
+        **overrides,
+    }
+
+
 def get_analysis_profile_config(analysis_profile):
     if analysis_profile not in ANALYSIS_PROFILES:
         raise ValueError(f"Unknown analysis profile: {analysis_profile}")
     return ANALYSIS_PROFILES[analysis_profile]
 
 
-def normalize_input_key(input_source, analysis_profile, mode, player_id):
+def get_workout_accounts():
+    return [dict(account) for account in WORKOUT_ACCOUNTS]
+
+
+def get_workout_account_label(account_id):
+    normalized_account_id = str(account_id or "").strip()
+    for account in WORKOUT_ACCOUNTS:
+        if account["id"] == normalized_account_id:
+            return account["label"]
+    return ""
+
+
+def validate_session_options(mode, player_id, account_id):
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in {"game", "workout"}:
+        raise ValueError(f"Unknown session mode: {mode}")
+
+    if normalized_mode != "workout":
+        return
+
+    if not str(account_id or "").strip():
+        raise ValueError("Workout mode requires an account selection.")
+
+    if not get_workout_account_label(account_id):
+        raise ValueError("Unknown workout account selected.")
+
+    if not str(player_id or "").strip():
+        raise ValueError("Workout mode requires a player number.")
+
+
+def normalize_input_key(input_source, analysis_profile, mode, player_id, account_id):
     source = input_source.strip()
     profile_key = (
-        f"profile:{analysis_profile}:mode:{mode}:player:{player_id.strip()}:analysis:{RESULT_CACHE_VERSION}"
+        "profile:"
+        f"{analysis_profile}:mode:{mode}:player:{player_id.strip()}:"
+        f"account:{str(account_id or '').strip()}:analysis:{RESULT_CACHE_VERSION}"
     )
     if is_youtube_url(source):
         video_id = extract_youtube_id(source)
@@ -164,6 +231,7 @@ def render_dashboard(
     session_name,
     mode,
     player_id,
+    account_id,
     input_source,
     analysis_profile,
 ):
@@ -176,6 +244,8 @@ def render_dashboard(
             "analysis_profile": analysis_profile,
             "analysis_profile_label": ANALYSIS_PROFILES[analysis_profile]["label"],
             "player_id": player_id.strip(),
+            "account_id": account_id.strip(),
+            "account_name": get_workout_account_label(account_id),
             "input_source": input_source,
             "input_path": str(result.input_path),
             "source_key": result.source_key,
@@ -192,10 +262,17 @@ def render_dashboard(
     )
 
 
-def submit_or_get_job(input_source, session_name, mode, player_id, analysis_profile):
+def submit_or_get_job(input_source, session_name, mode, player_id, account_id, analysis_profile):
     get_analysis_profile_config(analysis_profile)
+    validate_session_options(mode, player_id, account_id)
     validate_input_source(input_source)
-    cache_key = normalize_input_key(input_source, analysis_profile, mode, player_id)
+    cache_key = normalize_input_key(
+        input_source,
+        analysis_profile,
+        mode,
+        player_id,
+        account_id,
+    )
 
     with JOB_LOCK:
         prune_state_locked()
@@ -215,6 +292,7 @@ def submit_or_get_job(input_source, session_name, mode, player_id, analysis_prof
             session_name=session_name,
             mode=mode,
             player_id=player_id,
+            account_id=account_id,
             analysis_profile=analysis_profile,
             created_at=time(),
             updated_at=time(),
@@ -375,6 +453,22 @@ def prune_state_locked(now=None):
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     return TEMPLATES.TemplateResponse(
+        "prototype.html",
+        build_prototype_context(request),
+    )
+
+
+@app.get("/prototype", response_class=HTMLResponse)
+def prototype(request: Request):
+    return TEMPLATES.TemplateResponse(
+        "prototype.html",
+        build_prototype_context(request),
+    )
+
+
+@app.get("/classic", response_class=HTMLResponse)
+def classic_home(request: Request):
+    return TEMPLATES.TemplateResponse(
         "home.html",
         build_home_context(request),
     )
@@ -388,12 +482,14 @@ def analyze_session(
     mode: str = "game",
     analysis_profile: str = "preview",
     player_id: str = "",
+    account_id: str = "",
 ):
     form = {
         "session_name": session_name,
         "mode": mode,
         "analysis_profile": analysis_profile,
         "player_id": player_id,
+        "account_id": account_id,
         "input": input,
     }
 
@@ -403,12 +499,19 @@ def analyze_session(
             session_name,
             mode,
             player_id,
+            account_id,
             analysis_profile,
         )
     except Exception as exc:
         return TEMPLATES.TemplateResponse(
-            "home.html",
-            build_home_context(request, error=str(exc), form=form),
+            "prototype.html",
+            build_prototype_context(
+                request,
+                bootstrap={
+                    "error": str(exc),
+                    "form": form,
+                },
+            ),
             status_code=400,
         )
 
@@ -419,6 +522,7 @@ def analyze_session(
             session_name,
             mode,
             player_id,
+            account_id,
             input,
             analysis_profile,
         )
@@ -433,6 +537,8 @@ def analyze_session(
             "analysis_profile": analysis_profile,
             "analysis_profile_label": ANALYSIS_PROFILES[analysis_profile]["label"],
             "player_id": player_id.strip(),
+            "account_id": account_id.strip(),
+            "account_name": get_workout_account_label(account_id),
             "input_source": input,
             "progress": job.progress,
             "progress_message": job.progress_message,
@@ -462,6 +568,7 @@ def analysis_result(request: Request, job_id: str):
             job.session_name,
             job.mode,
             job.player_id,
+            job.account_id,
             job.input_source,
             job.analysis_profile,
         )
@@ -477,6 +584,7 @@ def analysis_result(request: Request, job_id: str):
                     "mode": job.mode,
                     "analysis_profile": job.analysis_profile,
                     "player_id": job.player_id,
+                    "account_id": job.account_id,
                     "input": job.input_source,
                 },
             ),
@@ -493,6 +601,8 @@ def analysis_result(request: Request, job_id: str):
             "analysis_profile": job.analysis_profile,
             "analysis_profile_label": ANALYSIS_PROFILES[job.analysis_profile]["label"],
             "player_id": job.player_id.strip(),
+            "account_id": job.account_id.strip(),
+            "account_name": get_workout_account_label(job.account_id),
             "input_source": job.input_source,
             "progress": job.progress,
             "progress_message": job.progress_message,
@@ -512,6 +622,7 @@ def analyze_session_api(
     mode: str = "game",
     analysis_profile: str = "preview",
     player_id: str = "",
+    account_id: str = "",
 ):
     try:
         cached_result, job = submit_or_get_job(
@@ -519,6 +630,7 @@ def analyze_session_api(
             session_name,
             mode,
             player_id,
+            account_id,
             analysis_profile,
         )
     except Exception as exc:
@@ -535,6 +647,8 @@ def analyze_session_api(
         payload["mode"] = mode
         payload["analysis_profile"] = analysis_profile
         payload["player_id"] = player_id
+        payload["account_id"] = account_id
+        payload["account_name"] = get_workout_account_label(account_id)
         payload["output_url"] = f"/outputs/{cached_result.output_path.name}"
         payload["status"] = "completed"
         payload["cached"] = True
@@ -547,6 +661,8 @@ def analyze_session_api(
             "poll_url": f"/api/jobs/{job.job_id}",
             "result_url": f"/results/{job.job_id}",
             "analysis_profile": analysis_profile,
+            "account_id": account_id,
+            "account_name": get_workout_account_label(account_id),
         },
         status_code=202,
     )
@@ -565,6 +681,8 @@ def get_job_status(job_id: str):
         "mode": job.mode,
         "analysis_profile": job.analysis_profile,
         "player_id": job.player_id,
+        "account_id": job.account_id,
+        "account_name": get_workout_account_label(job.account_id),
         "input": job.input_source,
         "result_url": f"/results/{job.job_id}",
         "progress": job.progress,

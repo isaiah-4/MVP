@@ -7,15 +7,50 @@
     <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body class="app-shell">
-    <main class="page home-page">
-        <section class="hero-panel">
-            <p class="eyebrow">Basketball Service MVP</p>
-            <h1>CourtVision</h1>
+    <main class="page home-page landing-page">
+        <section class="hero-panel landing-hero">
+            <div class="hero-header">
+                <div class="brand-lockup">
+                    <div class="brand-mark" aria-hidden="true">
+                        <span class="brand-mark-core">CV</span>
+                    </div>
+                    <div class="brand-copy">
+                        <p class="eyebrow">Basketball Service MVP</p>
+                        <h1>CourtVision</h1>
+                        <p class="hero-subtitle">No-wearable basketball analytics for workouts and games.</p>
+                    </div>
+                </div>
+                <div class="hero-pill-group">
+                    <span class="status-pill">Video In</span>
+                    <span class="status-pill">Metrics Out</span>
+                    <span class="status-pill">Processed Feed</span>
+                </div>
+            </div>
+
             <p class="lede">
-                This is the first product shell around the analysis pipeline from the tutorial:
-                upload or point at a video source, choose workout or game mode, and get a processed
-                feed plus touch and possession stats.
+                Start by choosing whether this session is a workout or a game. Workout runs stay
+                lightweight but can now be linked to a selected athlete account and jersey number,
+                while game runs keep the existing team-based flow intact.
             </p>
+
+            <div class="hero-highlights">
+                <article class="highlight-card">
+                    <span class="highlight-label">Workout</span>
+                    <strong>Account-linked athlete sessions</strong>
+                    <p>Pick an athlete account, add the jersey number, and run a focused session.</p>
+                </article>
+                <article class="highlight-card">
+                    <span class="highlight-label">Game</span>
+                    <strong>Current full-session path</strong>
+                    <p>Leave the game flow alone and keep using the current pipeline as-is.</p>
+                </article>
+                <article class="highlight-card">
+                    <span class="highlight-label">Output</span>
+                    <strong>Processed video plus metrics</strong>
+                    <p>Review overlays, touches, possession data, and shot events from one entry point.</p>
+                </article>
+            </div>
+
             {% if error %}
             <div class="alert-card">
                 <strong>Run failed.</strong>
@@ -23,58 +58,142 @@
             </div>
             {% endif %}
             <form class="session-form" action="/analyze" method="get">
-                <label>
-                    <span>Session Name</span>
-                    <input type="text" name="session_name" value="{{ form.session_name }}" required>
-                </label>
-                <label>
-                    <span>Video Source</span>
-                    <input type="text" name="input" value="{{ form.input }}" required>
-                </label>
-                <div class="mode-grid">
-                    <label class="mode-card">
-                        <input type="radio" name="analysis_profile" value="preview" {% if form.analysis_profile == "preview" %}checked{% endif %}>
-                        <span class="mode-title">Fast Preview</span>
-                        <span class="mode-copy">Default. Runs only the first 300 frames so a new video returns much faster.</span>
-                    </label>
-                    <label class="mode-card">
-                        <input type="radio" name="analysis_profile" value="full" {% if form.analysis_profile == "full" %}checked{% endif %}>
-                        <span class="mode-title">Full Run</span>
-                        <span class="mode-copy">Processes the whole video. Slower, but no preview cap.</span>
-                    </label>
+                <div class="mode-summary-card" id="mode-summary-card">
+                    <div>
+                        <span class="mode-summary-label">Selected Flow</span>
+                        <strong id="mode-summary-title">Game Session</strong>
+                    </div>
+                    <p id="mode-summary-copy">Team-based session tracking using the current analysis pipeline.</p>
                 </div>
-                <div class="mode-grid">
-                    <label class="mode-card">
-                        <input type="radio" name="mode" value="workout" {% if form.mode == "workout" %}checked{% endif %}>
-                        <span class="mode-title">Workout</span>
-                        <span class="mode-copy">Workout flow with a player number hint that anchors the primary tracked identity.</span>
-                    </label>
-                    <label class="mode-card">
-                        <input type="radio" name="mode" value="game" {% if form.mode == "game" %}checked{% endif %}>
-                        <span class="mode-title">Game</span>
-                        <span class="mode-copy">Game flow using team slots plus appearance-based identity cleanup and jersey OCR when available.</span>
-                    </label>
+
+                <div class="form-section framed-section">
+                    <div class="section-copy">
+                        <strong>Session Type</strong>
+                        <span>Pick the tracking flow first.</span>
+                    </div>
+                    <div class="mode-grid session-choice-grid">
+                        <label class="mode-card session-type-card">
+                            <input type="radio" name="mode" value="workout" {% if form.mode == "workout" %}checked{% endif %}>
+                            <span class="mode-title">Workout</span>
+                            <span class="mode-copy">Single-athlete flow with an account link and player number hint.</span>
+                        </label>
+                        <label class="mode-card session-type-card">
+                            <input type="radio" name="mode" value="game" {% if form.mode == "game" %}checked{% endif %}>
+                            <span class="mode-title">Game</span>
+                            <span class="mode-copy">Full-session tracking with the current team-based pipeline.</span>
+                        </label>
+                    </div>
                 </div>
-                <label id="player-id-row" class="{% if form.mode != 'workout' %}is-hidden{% endif %}">
-                    <span>Workout Player Number</span>
-                    <input type="text" name="player_id" value="{{ form.player_id }}" placeholder="Example: 12">
-                </label>
-                <button class="primary-button" type="submit">Run Session</button>
+
+                <div class="form-section framed-section">
+                    <div class="section-copy">
+                        <strong>Session Setup</strong>
+                        <span>Name the run and point CourtVision at the source video.</span>
+                    </div>
+                    <div class="setup-grid">
+                        <label>
+                            <span>Session Name</span>
+                            <input type="text" name="session_name" value="{{ form.session_name }}" required>
+                        </label>
+                        <label>
+                            <span>Video Source</span>
+                            <input type="text" name="input" value="{{ form.input }}" required>
+                        </label>
+                    </div>
+                </div>
+
+                <div id="workout-fields" class="form-section framed-section workout-fields {% if form.mode != 'workout' %}is-hidden{% endif %}">
+                    <div class="section-copy">
+                        <strong>Workout Link</strong>
+                        <span>Select which athlete account this workout should be tied to.</span>
+                    </div>
+                    <div class="setup-grid">
+                        <label id="workout-account-row">
+                            <span>Workout Account</span>
+                            <select name="account_id" id="account-id-input">
+                                <option value="">Select an account</option>
+                                {% for account in workout_accounts %}
+                                <option value="{{ account.id }}" {% if form.account_id == account.id %}selected{% endif %}>
+                                    {{ account.label }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                            <small class="field-note">Session metadata for the selected athlete profile.</small>
+                        </label>
+                        <label id="player-id-row">
+                            <span>Workout Player Number</span>
+                            <input id="player-id-input" type="text" name="player_id" value="{{ form.player_id }}" placeholder="Example: 12">
+                            <small class="field-note">This still feeds the workout identity hint used by the analysis pipeline.</small>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="form-section framed-section">
+                    <div class="section-copy">
+                        <strong>Processing Mode</strong>
+                        <span>Preview is faster. Full run processes the entire source.</span>
+                    </div>
+                    <div class="mode-grid">
+                        <label class="mode-card">
+                            <input type="radio" name="analysis_profile" value="preview" {% if form.analysis_profile == "preview" %}checked{% endif %}>
+                            <span class="mode-title">Fast Preview</span>
+                            <span class="mode-copy">Runs only the first 300 frames so a new source returns much faster.</span>
+                        </label>
+                        <label class="mode-card">
+                            <input type="radio" name="analysis_profile" value="full" {% if form.analysis_profile == "full" %}checked{% endif %}>
+                            <span class="mode-title">Full Run</span>
+                            <span class="mode-copy">Processes the full source. Slower, but without the preview cap.</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="submit-row">
+                    <button class="primary-button" id="submit-button" type="submit">Run Session</button>
+                    <p class="submit-note">Cached runs return faster after the first pass on a source.</p>
+                </div>
             </form>
         </section>
 
-        <aside class="side-panel">
+        <aside class="side-panel landing-rail">
+            <div class="info-card">
+                <p class="eyebrow">Session Flow</p>
+                <div class="step-list">
+                    <div class="step-row">
+                        <span class="step-number">1</span>
+                        <div>
+                            <strong>Choose the session type</strong>
+                            <span>Workout unlocks account linking. Game preserves the current path.</span>
+                        </div>
+                    </div>
+                    <div class="step-row">
+                        <span class="step-number">2</span>
+                        <div>
+                            <strong>Point at a video source</strong>
+                            <span>Use the same file-path or supported URL flow already in the backend.</span>
+                        </div>
+                    </div>
+                    <div class="step-row">
+                        <span class="step-number">3</span>
+                        <div>
+                            <strong>Review the processed output</strong>
+                            <span>Get the rendered feed first, then inspect the metrics surfaced today.</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="info-card">
                 <h2>Live Now</h2>
-                <ul>
+                <ul class="capability-list">
                     {% for item in available_now %}
                     <li>{{ item }}</li>
                     {% endfor %}
                 </ul>
             </div>
-            <div class="info-card">
+
+            <div class="info-card roadmap-info-card">
                 <h2>Next Build Targets</h2>
-                <ul>
+                <ul class="capability-list subdued-list">
                     {% for item in coming_next %}
                     <li>{{ item }}</li>
                     {% endfor %}
@@ -85,12 +204,38 @@
 
     <script>
         const modeInputs = document.querySelectorAll('input[name="mode"]');
-        const playerRow = document.getElementById('player-id-row');
+        const workoutFields = document.getElementById('workout-fields');
+        const accountInput = document.getElementById('account-id-input');
+        const playerInput = document.getElementById('player-id-input');
+        const submitButton = document.getElementById('submit-button');
+        const modeSummaryCard = document.getElementById('mode-summary-card');
+        const modeSummaryTitle = document.getElementById('mode-summary-title');
+        const modeSummaryCopy = document.getElementById('mode-summary-copy');
+
+        function syncModeCards() {
+            document.querySelectorAll('.session-type-card').forEach((card) => {
+                const input = card.querySelector('input[name="mode"]');
+                card.classList.toggle('is-selected', Boolean(input && input.checked));
+            });
+        }
 
         function syncPlayerField() {
             const selected = document.querySelector('input[name="mode"]:checked');
             if (!selected) return;
-            playerRow.classList.toggle('is-hidden', selected.value !== 'workout');
+            const isWorkout = selected.value === 'workout';
+
+            workoutFields.classList.toggle('is-hidden', !isWorkout);
+            accountInput.disabled = !isWorkout;
+            playerInput.disabled = !isWorkout;
+            accountInput.required = isWorkout;
+            playerInput.required = isWorkout;
+            submitButton.textContent = isWorkout ? 'Run Workout Session' : 'Run Game Session';
+            modeSummaryCard.classList.toggle('is-workout', isWorkout);
+            modeSummaryTitle.textContent = isWorkout ? 'Workout Session' : 'Game Session';
+            modeSummaryCopy.textContent = isWorkout
+                ? 'Account-linked athlete tracking with a jersey number hint for the primary identity.'
+                : 'Team-based session tracking using the current analysis pipeline.';
+            syncModeCards();
         }
 
         modeInputs.forEach((input) => input.addEventListener('change', syncPlayerField));
