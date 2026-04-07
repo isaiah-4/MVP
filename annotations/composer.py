@@ -25,6 +25,7 @@ def render_all_annotations(
     ball_control_color=(0, 255, 255),
     keypoint_color=(0, 255, 255),
 ):
+    # Build the tactical court once for the full render pass, then copy per frame.
     court_template = _build_court_template(court_projector)
     output_frames = []
     marker_radius = 8
@@ -150,11 +151,20 @@ def _build_court_template(court_projector):
 
 
 def _draw_scoreboard(frame, passes, interceptions, team_colors):
-    overlay = frame.copy()
     top_left = (20, 20)
     bottom_right = (275, 120)
-    cv2.rectangle(overlay, top_left, bottom_right, (245, 245, 245), -1)
-    cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+    x1, y1 = top_left
+    x2, y2 = bottom_right
+    overlay = frame[y1:y2, x1:x2].copy()
+    cv2.rectangle(overlay, (0, 0), (x2 - x1, y2 - y1), (245, 245, 245), -1)
+    blended_region = cv2.addWeighted(
+        overlay,
+        0.72,
+        frame[y1:y2, x1:x2],
+        0.28,
+        0,
+    )
+    frame[y1:y2, x1:x2] = blended_region
     cv2.rectangle(frame, top_left, bottom_right, (50, 50, 50), 2)
 
     frame = put_text_with_outline(

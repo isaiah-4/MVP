@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 
 from utils import read_stub, save_stub
@@ -9,16 +11,22 @@ class CourtKeypointDetector:
         self.model = get_yolo_model(model_path)
         self.keypoint_confidence = float(keypoint_confidence)
         self.frame_interval = max(1, int(frame_interval))
+        self.batch_size = max(
+            1,
+            int(os.environ.get("COURTVISION_COURT_BATCH_SIZE", "12")),
+        )
+        self.detection_confidence = float(
+            os.environ.get("COURTVISION_COURT_DETECTION_CONFIDENCE", "0.4")
+        )
 
     def detect_frames(self, frames):
-        batch_size = 20
         detections = []
 
-        for frame_index in range(0, len(frames), batch_size):
-            batch_frames = frames[frame_index:frame_index + batch_size]
+        for frame_index in range(0, len(frames), self.batch_size):
+            batch_frames = frames[frame_index:frame_index + self.batch_size]
             batch_detections = self.model.predict(
                 batch_frames,
-                conf=0.5,
+                conf=self.detection_confidence,
                 verbose=False,
             )
             detections.extend(batch_detections)

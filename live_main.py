@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -19,7 +20,7 @@ from analysis_pipeline import (
     run_analysis,
     run_chunked_full_analysis,
 )
-from utils.input_utils import extract_youtube_id, is_youtube_url
+from utils.input_utils import build_source_key, extract_youtube_id, is_youtube_url
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -48,6 +49,7 @@ RESULT_CACHE = {}
 RESULT_CACHE_UPDATED_AT = {}
 ACTIVE_JOBS_BY_KEY = {}
 JOBS = {}
+DISK_CACHE_KEY_PREFIX = "disk-cache:"
 ANALYSIS_PROFILES = {
     "preview": {
         "label": "Fast Preview",
@@ -95,7 +97,7 @@ def build_home_context(request, **overrides):
         "request": request,
         "error": None,
         "form": {
-            "session_name": "Lakers Demo Session",
+            "session_name": "Game ...",
             "mode": "game",
             "analysis_profile": "preview",
             "player_id": "",
@@ -112,10 +114,7 @@ def build_home_context(request, **overrides):
             "First-pass shot attempts and makes/misses from ball, hoop, and release heuristics",
         ],
         "coming_next": [
-            "Shot chart and hot zone views from detected attempt locations",
-            "Clip review and side-by-side comparisons",
-            "Stronger sports ReID beyond the current appearance-based identity layer",
-            "AI review and form feedback",
+            "Improvements to the shot and ball tracking as well as the team assigning and deflection tracking",
         ],
     }
     context.update(overrides)
@@ -225,6 +224,87 @@ def validate_input_source(input_source):
         raise FileNotFoundError(f"Video file not found: {source_path}")
 
 
+def build_base_source_key(input_source):
+    source = input_source.strip()
+    if is_youtube_url(source):
+        return build_source_key(source)
+
+    source_path = Path(source).expanduser()
+    if not source_path.is_absolute():
+        source_path = (PROJECT_ROOT / source_path).resolve()
+
+    return build_source_key(source, resolved_path=source_path)
+
+
+def result_matches_request(result, input_source, analysis_profile, mode, player_id):
+    profile_config = get_analysis_profile_config(analysis_profile)
+    expected_base_source_key = build_base_source_key(input_source)
+
+    return (
+        str(result.base_source_key) == str(expected_base_source_key)
+        and str(result.mode) == str(mode)
+        and str(result.workout_player_id or "") == str(player_id or "")
+        and result.max_frames == profile_config.get("max_frames")
+        and result.chunk_frames == profile_config.get("chunk_frames")
+        and result.max_dimension == profile_config.get("max_dimension")
+        and int(result.court_keypoint_interval)
+        == int(profile_config.get("court_keypoint_interval", 12))
+    )
+
+
+def find_semantic_cached_result(input_source, analysis_profile, mode, player_id):
+    seen_output_paths = set()
+    for cache_key, cached_result in RESULT_CACHE.items():
+        if cached_result is None:
+            continue
+        output_path = str(cached_result.output_path)
+        if output_path in seen_output_paths:
+            continue
+        seen_output_paths.add(output_path)
+        if result_matches_request(
+            cached_result,
+            input_source,
+            analysis_profile,
+            mode,
+            player_id,
+        ):
+            return cache_key, cached_result
+    return None, None
+
+
+def warm_result_cache_from_disk():
+    output_dir = PROJECT_ROOT / "Output_vids"
+    if not output_dir.exists():
+        return
+
+    with JOB_LOCK:
+        for cache_path in output_dir.glob("*.json"):
+            try:
+                payload = json.loads(cache_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+
+            if int(payload.get("cache_version", 0)) != RESULT_CACHE_VERSION:
+                continue
+
+            try:
+                cached_result = AnalysisRunResult.from_public_dict(payload)
+            except Exception:
+                continue
+
+            if not cached_result.output_path.exists():
+                continue
+
+            cache_key = f"{DISK_CACHE_KEY_PREFIX}{cache_path.name}"
+            RESULT_CACHE[cache_key] = cached_result
+            RESULT_CACHE_UPDATED_AT[cache_key] = float(cache_path.stat().st_mtime)
+
+        prune_state_locked()
+
+
+app.add_event_handler("startup", warm_result_cache_from_disk)
+
+
 def render_dashboard(
     request,
     result,
@@ -278,6 +358,20 @@ def submit_or_get_job(input_source, session_name, mode, player_id, account_id, a
         prune_state_locked()
         cached_result = RESULT_CACHE.get(cache_key)
         if cached_result is not None:
+            return cached_result, None
+
+        matched_cache_key, cached_result = find_semantic_cached_result(
+            input_source,
+            analysis_profile,
+            mode,
+            player_id,
+        )
+        if cached_result is not None:
+            RESULT_CACHE[cache_key] = cached_result
+            RESULT_CACHE_UPDATED_AT[cache_key] = RESULT_CACHE_UPDATED_AT.get(
+                matched_cache_key,
+                time(),
+            )
             return cached_result, None
 
         active_job_id = ACTIVE_JOBS_BY_KEY.get(cache_key)

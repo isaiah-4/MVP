@@ -17,7 +17,7 @@
             </div>
             <div class="status-stack dashboard-status-stack">
                 <span class="status-pill {% if using_court_model %}is-good{% else %}is-warn{% endif %}">
-                    {% if using_court_model %}Court model active{% else %}Fallback court projection{% endif %}
+                    {% if using_court_model %}Court model active{% else %}Court projection unavailable{% endif %}
                 </span>
                 <span class="status-pill">{{ analysis_profile_label }}</span>
                 {% if chunk_count and chunk_count > 1 %}
@@ -105,12 +105,11 @@
                             <span>Current read on this run</span>
                         </div>
                         <ul class="capability-list">
+                            {% for warning in metrics.warnings or [] %}
+                            <li>{{ warning.message }}</li>
+                            {% endfor %}
                             {% if analysis_profile == "preview" %}
                             <li>This run is a preview, so the dashboard reflects only the first {{ max_frames }} frames.</li>
-                            {% endif %}
-                            {% if player_ids_are_chunk_local %}
-                            <li>This full run was processed in chunks, so player labels are chunk-local until cross-chunk identity matching is added.</li>
-                            <li>Touch, pass, and interception totals can drift slightly at chunk boundaries until possession state carries across chunks.</li>
                             {% endif %}
                             <li>Shot attempts and makes or misses are heuristic detections based on release plus ball-to-hoop motion.</li>
                             <li>Player identities use appearance-based tracklet resolution, with jersey OCR layered on when a readable crop is available.</li>
@@ -129,6 +128,9 @@
                                 <span>Projected release points on a folded half court</span>
                             </div>
                             <div class="chart-controls">
+                                {% if player_ids_are_chunk_local %}
+                                <span class="status-pill is-warn">Chunk-local player labels</span>
+                                {% endif %}
                                 <select id="shot-player-filter" class="dashboard-select">
                                     <option value="all">All Players</option>
                                 </select>
@@ -177,6 +179,9 @@
                                 <h2>Hot Zones</h2>
                                 <span>Field goal percentage by zone from projected shots</span>
                             </div>
+                            {% if player_ids_are_chunk_local %}
+                            <span class="status-pill is-warn">Chunk-local player labels</span>
+                            {% endif %}
                         </div>
                         <div id="hot-zone-court" class="court-visual"></div>
                         <div class="chart-meta-row">
@@ -667,15 +672,22 @@
                 </div>
             `).join("");
 
-            if (filteredShots.length === 0) {
-                shotChartNote.textContent = attempts === 0
-                    ? "No projected shots matched the current filter."
-                    : "No projected shots available.";
-            } else if (unprojectedShotCount > 0) {
-                shotChartNote.textContent = `${unprojectedShotCount} detected shots had no projected release point and are not shown on the chart.`;
-            } else {
-                shotChartNote.textContent = "All projected shot events are plotted on the chart.";
+            const shotChartMessages = [];
+            if (DASHBOARD_DATA.playerIdsAreChunkLocal) {
+                shotChartMessages.push("Player filters are chunk-local for this run, so the same real player may appear under multiple labels.");
             }
+            if (filteredShots.length === 0) {
+                shotChartMessages.push(
+                    attempts === 0
+                        ? "No projected shots matched the current filter."
+                        : "No projected shots available."
+                );
+            } else if (unprojectedShotCount > 0) {
+                shotChartMessages.push(`${unprojectedShotCount} detected shots had no projected release point and are not shown on the chart.`);
+            } else {
+                shotChartMessages.push("All projected shot events are plotted on the chart.");
+            }
+            shotChartNote.textContent = shotChartMessages.join(" ");
         }
 
         function renderHotZones() {
@@ -702,9 +714,16 @@
                     </div>
                 `).join("");
 
-            hotZoneNote.textContent = projectedShots.length > 0
-                ? `${projectedShots.length} projected shots contributed to zone efficiency.`
-                : "No projected shots are available yet for heat mapping.";
+            const hotZoneMessages = [];
+            if (DASHBOARD_DATA.playerIdsAreChunkLocal) {
+                hotZoneMessages.push("Zone totals are session-wide, but player labels remain chunk-local in this run.");
+            }
+            hotZoneMessages.push(
+                projectedShots.length > 0
+                    ? `${projectedShots.length} projected shots contributed to zone efficiency.`
+                    : "No projected shots are available yet for heat mapping."
+            );
+            hotZoneNote.textContent = hotZoneMessages.join(" ");
         }
 
         function renderPlayerCards() {

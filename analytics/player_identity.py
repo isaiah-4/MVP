@@ -31,12 +31,17 @@ class PlayerIdentityResolver:
         max_samples_per_track=6,
         max_ocr_samples_per_track=2,
         min_crop_height_for_ocr=28,
-        max_merge_gap_frames=180,
+        max_merge_gap_frames=None,
         min_merge_similarity=0.9,
     ):
         self.max_samples_per_track = max(1, int(max_samples_per_track))
         self.max_ocr_samples_per_track = max(1, int(max_ocr_samples_per_track))
         self.min_crop_height_for_ocr = max(1, int(min_crop_height_for_ocr))
+        if max_merge_gap_frames is None:
+            max_merge_gap_frames = os.environ.get(
+                "COURTVISION_MAX_MERGE_GAP_FRAMES",
+                "180",
+            )
         self.max_merge_gap_frames = max(1, int(max_merge_gap_frames))
         self.min_merge_similarity = float(min_merge_similarity)
         self._tesseract_path = shutil.which("tesseract")
@@ -215,7 +220,9 @@ class PlayerIdentityResolver:
             [0, 180, 0, 256, 0, 256],
         )
         hist = hist.flatten().astype(np.float32)
-        return _normalize_vector(hist)
+        layout_features = _compute_spatial_hsv_layout_features(hsv)
+        feature_vector = np.concatenate([hist, layout_features]).astype(np.float32)
+        return _normalize_vector(feature_vector)
 
     def _read_jersey_number(self, crop, *, trocr_crop=None):
         if not self._ocr_enabled:
@@ -498,7 +505,7 @@ class PlayerIdentityResolver:
         )
 
         return {
-            "appearance_backend": "color_histogram",
+            "appearance_backend": "color_histogram+spatial_hsv_layout",
             "ocr_backend": self._describe_ocr_backend(),
             "resolved_players": len(players),
             "players_with_numbers": int(players_with_numbers),
@@ -509,7 +516,7 @@ class PlayerIdentityResolver:
 
     def _build_empty_identity_data(self):
         return {
-            "appearance_backend": "color_histogram",
+            "appearance_backend": "color_histogram+spatial_hsv_layout",
             "ocr_backend": self._describe_ocr_backend(),
             "resolved_players": 0,
             "players_with_numbers": 0,
@@ -535,6 +542,7 @@ class PlayerIdentityResolver:
             return "none", "none", "", "cpu"
 
         requested_backend = os.environ.get("COURTVISION_JERSEY_OCR_BACKEND", "auto").strip().lower() or "auto"
+        trocr_opt_in = _env_flag("COURTVISION_ENABLE_TROCR", default=False)
         trocr_model_id = os.environ.get(
             "COURTVISION_TROCR_MODEL_ID",
             "microsoft/trocr-base-printed",
@@ -561,11 +569,13 @@ class PlayerIdentityResolver:
                 return "trocr", "none", trocr_model_id, trocr_device
             return "none", "none", trocr_model_id, trocr_device
 
-        if trocr_available:
+        if trocr_available and trocr_opt_in:
             fallback = "tesseract" if tesseract_available else "none"
             return "trocr", fallback, trocr_model_id, trocr_device
         if tesseract_available:
             return "tesseract", "none", trocr_model_id, trocr_device
+        if trocr_available:
+            return "trocr", "none", trocr_model_id, trocr_device
         return "none", "none", trocr_model_id, trocr_device
 
     def _describe_ocr_backend(self):
@@ -644,6 +654,25 @@ def _prepare_trocr_crop(crop):
     return cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
 
 
+def _compute_spatial_hsv_layout_features(hsv_crop):
+    if hsv_crop is None or hsv_crop.size == 0:
+        return np.zeros(9, dtype=np.float32)
+
+    height = int(hsv_crop.shape[0])
+    split_index = max(1, height // 2)
+    top_half = hsv_crop[:split_index]
+    bottom_half = hsv_crop[split_index:] if split_index < height else hsv_crop[:split_index]
+
+    top_mean = np.mean(top_half.reshape(-1, 3), axis=0, dtype=np.float32)
+    bottom_mean = np.mean(bottom_half.reshape(-1, 3), axis=0, dtype=np.float32)
+
+    scale = np.asarray([180.0, 255.0, 255.0], dtype=np.float32)
+    top_mean /= scale
+    bottom_mean /= scale
+    delta = top_mean - bottom_mean
+    return np.concatenate([top_mean, bottom_mean, delta]).astype(np.float32)
+
+
 def _run_tesseract_digits(tesseract_path, image_path, *, psm):
     try:
         process = subprocess.run(
@@ -686,6 +715,13 @@ def _transformers_ocr_available():
     except Exception:
         return False
     return True
+
+
+def _env_flag(name, *, default=False):
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return bool(default)
+    return str(raw_value).strip().lower() not in {"0", "false", "no", "off", ""}
 
 
 def _get_torch_inference_device():

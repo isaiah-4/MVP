@@ -15,19 +15,28 @@ class SessionMetricsBuilder:
         pass_interception_data,
         shot_data=None,
         identity_data=None,
+        *,
+        initial_state=None,
+        frame_offset=0,
+        finalize_open_state=True,
     ):
         shot_data = shot_data or {"events": []}
         identity_data = identity_data or {"players_by_id": {}, "players": []}
         identity_by_player = identity_data.get("players_by_id", {})
+        state = initial_state or {}
         player_metrics = {}
         team_possession_frames = Counter()
         team_shot_totals = Counter()
         team_make_totals = Counter()
 
-        previous_holder = -1
-        possession_start_frame = None
+        previous_holder = state.get("previous_holder", -1)
+        possession_start_frame = state.get("possession_start_frame")
+        if possession_start_frame is not None:
+            possession_start_frame = int(possession_start_frame)
+        frame_offset = int(frame_offset)
 
         for frame_num, frame_players in enumerate(player_tracks):
+            absolute_frame_num = frame_offset + int(frame_num)
             frame_assignment = team_assignments[frame_num]
             current_holder = possession_data["player"][frame_num]
             current_team = possession_data["team"][frame_num]
@@ -55,7 +64,9 @@ class SessionMetricsBuilder:
                         -1,
                     )
                     player_entry["possessions"] += 1
-                    player_entry["possession_frames"] += frame_num - possession_start_frame
+                    player_entry["possession_frames"] += (
+                        absolute_frame_num - possession_start_frame
+                    )
 
                 if current_holder != -1:
                     player_entry = self._get_player_entry(
@@ -64,18 +75,20 @@ class SessionMetricsBuilder:
                         frame_assignment.get(current_holder, -1),
                     )
                     player_entry["touches"] += 1
-                    possession_start_frame = frame_num
+                    possession_start_frame = absolute_frame_num
                 else:
                     possession_start_frame = None
 
                 previous_holder = current_holder
 
-        if previous_holder != -1 and possession_start_frame is not None:
+        if finalize_open_state and previous_holder != -1 and possession_start_frame is not None:
             player_entry = self._get_player_entry(player_metrics, previous_holder, -1)
             player_entry["possessions"] += 1
             player_entry["possession_frames"] += (
-                len(possession_data["player"]) - possession_start_frame
+                (frame_offset + len(possession_data["player"])) - possession_start_frame
             )
+            previous_holder = -1
+            possession_start_frame = None
 
         player_rows = []
         total_touches = 0
@@ -237,6 +250,12 @@ class SessionMetricsBuilder:
                 "players_with_numbers": int(identity_data.get("players_with_numbers", 0)),
                 "primary_identity": identity_data.get("primary_identity"),
                 "players": list(identity_data.get("players", [])),
+            },
+            "state": {
+                "previous_holder": previous_holder,
+                "possession_start_frame": (
+                    None if possession_start_frame is None else int(possession_start_frame)
+                ),
             },
         }
 
