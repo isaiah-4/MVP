@@ -12,7 +12,9 @@ class CourtProjector:
         tactical_scale=22,
         panel_padding=18,
         fallback_margin=0.06,
-        keypoint_error_tolerance=0.8,
+        keypoint_error_tolerance=0.4,
+        keypoint_smoothing_alpha=0.35,
+        max_homography_hold_frames=6,
     ):
         self.court_width_m = float(court_width_m)
         self.court_length_m = float(court_length_m)
@@ -20,6 +22,8 @@ class CourtProjector:
         self.panel_padding = int(panel_padding)
         self.fallback_margin = float(fallback_margin)
         self.keypoint_error_tolerance = float(keypoint_error_tolerance)
+        self.keypoint_smoothing_alpha = float(np.clip(keypoint_smoothing_alpha, 0.0, 1.0))
+        self.max_homography_hold_frames = max(0, int(max_homography_hold_frames))
         self.target_points_m = {
             0: (0.0, 0.0),
             1: (0.91, 0.0),
@@ -42,22 +46,7 @@ class CourtProjector:
         }
 
     def detect_keypoints(self, video_frames):
-        court_keypoints = []
-        for frame in video_frames:
-            frame_height, frame_width = frame.shape[:2]
-            margin_x = int(frame_width * self.fallback_margin)
-            margin_y = int(frame_height * self.fallback_margin)
-
-            court_keypoints.append(
-                {
-                    0: (margin_x, margin_y),
-                    5: (frame_width - margin_x - 1, margin_y),
-                    10: (frame_width - margin_x - 1, frame_height - margin_y - 1),
-                    15: (margin_x, frame_height - margin_y - 1),
-                }
-            )
-
-        return court_keypoints
+        return [{} for _ in video_frames]
 
     def validate_keypoints(self, court_keypoints):
         validated_keypoints = []
@@ -124,9 +113,10 @@ class CourtProjector:
     def project_tracks(self, court_keypoints, player_tracks, ball_tracks):
         player_positions_m = []
         ball_positions_m = []
+        homographies = self._build_frame_homographies(court_keypoints)
 
         for frame_num, frame_players in enumerate(player_tracks):
-            homography = self._build_homography(court_keypoints[frame_num])
+            homography = homographies[frame_num] if frame_num < len(homographies) else None
             frame_player_positions = {}
             frame_ball_position = None
 
@@ -253,6 +243,56 @@ class CourtProjector:
             ransacReprojThreshold=1.0,
         )
         return homography
+
+    def _build_frame_homographies(self, court_keypoints):
+        homographies = []
+        previous_homography = None
+        held_frames = 0
+
+        for frame_keypoints in self._smooth_keypoints(court_keypoints):
+            homography = self._build_homography(frame_keypoints)
+            if homography is not None:
+                previous_homography = homography
+                held_frames = 0
+                homographies.append(homography)
+                continue
+
+            if previous_homography is not None and held_frames < self.max_homography_hold_frames:
+                homographies.append(previous_homography)
+                held_frames += 1
+                continue
+
+            previous_homography = None
+            held_frames = 0
+            homographies.append(None)
+
+        return homographies
+
+    def _smooth_keypoints(self, court_keypoints):
+        smoothed_keypoints = []
+        previous_points = {}
+
+        for frame_keypoints in court_keypoints:
+            smoothed_frame = {}
+            for keypoint_id, point in frame_keypoints.items():
+                point_array = np.asarray(point, dtype=np.float32)
+                previous_point = previous_points.get(keypoint_id)
+                if previous_point is not None:
+                    point_array = (
+                        (previous_point * (1.0 - self.keypoint_smoothing_alpha))
+                        + (point_array * self.keypoint_smoothing_alpha)
+                    )
+                smoothed_frame[keypoint_id] = (
+                    float(point_array[0]),
+                    float(point_array[1]),
+                )
+            previous_points = {
+                keypoint_id: np.asarray(point, dtype=np.float32)
+                for keypoint_id, point in smoothed_frame.items()
+            }
+            smoothed_keypoints.append(smoothed_frame)
+
+        return smoothed_keypoints
 
     def _transform_point(self, homography, point):
         source_point = np.asarray([[point]], dtype=np.float32)

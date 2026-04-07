@@ -2,15 +2,16 @@ from collections import defaultdict
 
 
 class PassInterceptionDetector:
-    def detect(self, possession_data):
+    def detect(self, possession_data, *, initial_state=None):
+        state = initial_state or {}
         team_pass_counts = defaultdict(int)
         team_interception_counts = defaultdict(int)
         passes_per_frame = []
         interceptions_per_frame = []
         events = []
 
-        last_valid_holder = -1
-        last_valid_team = -1
+        last_valid_holder = state.get("last_valid_holder", -1)
+        last_valid_team = int(state.get("last_valid_team", -1))
 
         for frame_num, current_holder in enumerate(possession_data["player"]):
             current_team = possession_data["team"][frame_num]
@@ -56,4 +57,8 @@ class PassInterceptionDetector:
             "events_by_frame": dict(events_by_frame),
             "passes_per_frame": passes_per_frame,
             "interceptions_per_frame": interceptions_per_frame,
+            "state": {
+                "last_valid_holder": last_valid_holder,
+                "last_valid_team": int(last_valid_team),
+            },
         }

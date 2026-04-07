@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import supervision as sv
 from utils import save_stub, read_stub
@@ -7,13 +9,23 @@ class PlayerTracker:
     def __init__(self, model_path):
         self.model = get_yolo_model(model_path)
         self.tracker = sv.ByteTrack()
+        self.batch_size = max(
+            1,
+            int(os.environ.get("COURTVISION_PLAYER_BATCH_SIZE", "12")),
+        )
+        self.confidence = float(
+            os.environ.get("COURTVISION_PLAYER_CONFIDENCE", "0.5")
+        )
 
     def detect_frames(self, frames):
-        batch_size = 20
         detections = []
-        for i in range(0, len(frames), batch_size):
-            batch_frames = frames[i:i + batch_size]
-            batch_detections = self.model.predict(batch_frames, conf=0.5, verbose=False)
+        for i in range(0, len(frames), self.batch_size):
+            batch_frames = frames[i:i + self.batch_size]
+            batch_detections = self.model.predict(
+                batch_frames,
+                conf=self.confidence,
+                verbose=False,
+            )
             detections += batch_detections
         return detections
         

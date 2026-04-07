@@ -4,20 +4,46 @@ import numpy as np
 
 
 class SpeedDistanceCalculator:
-    def __init__(self, fps=24.0, max_step_per_frame_m=1.0, speed_window=5):
+    def __init__(
+        self,
+        fps=24.0,
+        max_step_per_frame_m=None,
+        max_speed_mps=10.0,
+        speed_window=5,
+    ):
         self.fps = float(fps)
-        self.max_step_per_frame_m = float(max_step_per_frame_m)
+        self.max_step_per_frame_m = (
+            None if max_step_per_frame_m is None else float(max_step_per_frame_m)
+        )
+        self.max_speed_mps = float(max_speed_mps)
         self.speed_window = int(speed_window)
 
-    def calculate(self, player_positions_m):
-        previous_positions = {}
-        previous_frames = {}
-        total_distances = {}
-        speed_histories = defaultdict(list)
+    def calculate(self, player_positions_m, *, initial_state=None, frame_offset=0):
+        state = initial_state or {}
+        previous_positions = {
+            player_id: np.asarray(position, dtype=float)
+            for player_id, position in state.get("previous_positions", {}).items()
+        }
+        previous_frames = {
+            player_id: int(frame_num)
+            for player_id, frame_num in state.get("previous_frames", {}).items()
+        }
+        total_distances = {
+            player_id: float(distance)
+            for player_id, distance in state.get("total_distances", {}).items()
+        }
+        speed_histories = defaultdict(
+            list,
+            {
+                player_id: [float(value) for value in history]
+                for player_id, history in state.get("speed_histories", {}).items()
+            },
+        )
         player_distances_per_frame = []
         player_speeds_per_frame = []
 
-        for frame_num, frame_positions in enumerate(player_positions_m):
+        for local_frame_num, frame_positions in enumerate(player_positions_m):
+            frame_num = int(frame_offset) + int(local_frame_num)
             frame_distances = {}
             frame_speeds = {}
 
@@ -31,7 +57,7 @@ class SpeedDistanceCalculator:
                     step_distance = float(
                         np.linalg.norm(position_array - previous_position)
                     )
-                    max_allowed_step = self.max_step_per_frame_m * frame_gap
+                    max_allowed_step = self._get_max_allowed_step(frame_gap)
 
                     if step_distance <= max_allowed_step:
                         total_distances[player_id] += step_distance
@@ -57,4 +83,28 @@ class SpeedDistanceCalculator:
             "player_distances_per_frame": player_distances_per_frame,
             "player_speeds_per_frame": player_speeds_per_frame,
             "total_distances": total_distances,
+            "state": {
+                "previous_positions": {
+                    player_id: position.tolist()
+                    for player_id, position in previous_positions.items()
+                },
+                "previous_frames": {
+                    player_id: int(frame_num)
+                    for player_id, frame_num in previous_frames.items()
+                },
+                "total_distances": {
+                    player_id: float(distance)
+                    for player_id, distance in total_distances.items()
+                },
+                "speed_histories": {
+                    player_id: [float(value) for value in history]
+                    for player_id, history in speed_histories.items()
+                },
+            },
         }
+
+    def _get_max_allowed_step(self, frame_gap):
+        per_frame_cap = self.max_step_per_frame_m
+        if per_frame_cap is None:
+            per_frame_cap = self.max_speed_mps / max(self.fps, 1.0)
+        return float(per_frame_cap) * max(1, int(frame_gap))

@@ -17,9 +17,10 @@ class TeamAssigner:
     def assign_teams(self, video_frames, player_tracks):
         samples = []
         sample_track_ids = []
-        max_frames = min(len(video_frames), self.sample_frames)
+        sample_indices = self._build_sample_indices(len(video_frames))
+        anchor_track_id = None
 
-        for frame_num in range(max_frames):
+        for frame_num in sample_indices:
             frame = video_frames[frame_num]
             for track_id, player in player_tracks[frame_num].items():
                 bbox = player.get("bbox") or player.get("box")
@@ -32,10 +33,17 @@ class TeamAssigner:
 
                 samples.append(color_feature)
                 sample_track_ids.append(track_id)
+                if anchor_track_id is None:
+                    anchor_track_id = track_id
 
         if len(samples) >= 2:
             labels, centers = self._cluster_color_samples(samples)
-            cluster_to_team = self._build_cluster_to_team(centers)
+            cluster_to_team = self._build_cluster_to_team(
+                centers,
+                labels=labels,
+                sample_track_ids=sample_track_ids,
+                anchor_track_id=anchor_track_id,
+            )
             track_votes = defaultdict(list)
 
             for label, track_id in zip(labels.flatten().tolist(), sample_track_ids):
@@ -119,13 +127,58 @@ class TeamAssigner:
         )
         return labels, centers
 
-    def _build_cluster_to_team(self, centers):
+    def _build_cluster_to_team(
+        self,
+        centers,
+        *,
+        labels=None,
+        sample_track_ids=None,
+        anchor_track_id=None,
+    ):
+        if (
+            labels is not None
+            and sample_track_ids
+            and anchor_track_id is not None
+        ):
+            flattened_labels = labels.flatten().tolist()
+            for label, track_id in zip(flattened_labels, sample_track_ids):
+                if track_id != anchor_track_id:
+                    continue
+                anchor_cluster = int(label)
+                other_cluster_ids = [
+                    cluster_id
+                    for cluster_id in range(len(centers))
+                    if cluster_id != anchor_cluster
+                ]
+                if other_cluster_ids:
+                    return {
+                        anchor_cluster: 1,
+                        int(other_cluster_ids[0]): 2,
+                    }
+
         center_sums = [float(np.sum(center)) for center in centers]
         ordered_indices = np.argsort(center_sums)
         return {
             int(ordered_indices[0]): 1,
             int(ordered_indices[1]): 2,
         }
+
+    def _build_sample_indices(self, frame_count):
+        frame_count = int(frame_count)
+        if frame_count <= 0:
+            return []
+
+        sample_count = min(frame_count, int(self.sample_frames))
+        if sample_count <= 1:
+            return [0]
+
+        indices = np.linspace(
+            0,
+            frame_count - 1,
+            num=sample_count,
+            dtype=int,
+        )
+        return sorted({int(index) for index in indices.tolist()})
 
     def _build_display_color(self, center):
         color = np.clip(center.astype(int), 35, 255)

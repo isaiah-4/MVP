@@ -30,7 +30,7 @@ from utils import (
 )
 
 
-RESULT_CACHE_VERSION = 7
+RESULT_CACHE_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,7 @@ class AnalysisRunResult:
     fps: float
     player_model_path: str
     ball_model_path: str
+    model_file_state: dict
     using_court_model: bool
     court_model_path: str
     court_keypoint_interval: int
@@ -56,6 +57,7 @@ class AnalysisRunResult:
     chunk_count: int | None
     player_ids_are_chunk_local: bool
     chunk_outputs: tuple[dict, ...]
+    carry_state: dict
     session_metrics: dict
 
     def to_public_dict(self):
@@ -68,6 +70,7 @@ class AnalysisRunResult:
             "fps": self.fps,
             "player_model_path": self.player_model_path,
             "ball_model_path": self.ball_model_path,
+            "model_file_state": self.model_file_state,
             "using_court_model": self.using_court_model,
             "court_model_path": self.court_model_path,
             "court_keypoint_interval": self.court_keypoint_interval,
@@ -82,6 +85,7 @@ class AnalysisRunResult:
             "chunk_count": self.chunk_count,
             "player_ids_are_chunk_local": self.player_ids_are_chunk_local,
             "chunk_outputs": list(self.chunk_outputs),
+            "carry_state": self.carry_state,
             "session_metrics": self.session_metrics,
         }
 
@@ -93,8 +97,9 @@ class AnalysisRunResult:
             input_path=Path(payload["input_path"]),
             output_path=Path(payload["output_path"]),
             fps=float(payload["fps"]),
-            player_model_path=payload.get("player_model_path", "Models/player_detector.pt"),
+            player_model_path=payload.get("player_model_path", "Models/Player_detection_model.pt"),
             ball_model_path=payload.get("ball_model_path", "Models/ball_detector_model.pt"),
+            model_file_state=payload.get("model_file_state", {}),
             using_court_model=bool(payload["using_court_model"]),
             court_model_path=payload["court_model_path"],
             court_keypoint_interval=int(payload.get("court_keypoint_interval", 1)),
@@ -118,6 +123,7 @@ class AnalysisRunResult:
                 payload.get("player_ids_are_chunk_local", False)
             ),
             chunk_outputs=tuple(payload.get("chunk_outputs", [])),
+            carry_state=payload.get("carry_state", {}),
             session_metrics=payload["session_metrics"],
         )
 
@@ -137,10 +143,49 @@ def _build_effective_run_suffix(run_suffix, max_dimension, mode, workout_player_
     return "_".join(suffix_parts)
 
 
+def _build_model_file_state(*, player_model, ball_model, court_model):
+    return {
+        "player_model": _get_model_file_state(player_model),
+        "ball_model": _get_model_file_state(ball_model),
+        "court_model": _get_model_file_state(court_model),
+    }
+
+
+def _get_model_file_state(model_path):
+    resolved_path = Path(model_path).expanduser().resolve()
+    if not resolved_path.exists():
+        return {
+            "path": str(resolved_path),
+            "exists": False,
+            "mtime_ns": None,
+            "size": None,
+        }
+
+    stat_result = resolved_path.stat()
+    return {
+        "path": str(resolved_path),
+        "exists": True,
+        "mtime_ns": int(stat_result.st_mtime_ns),
+        "size": int(stat_result.st_size),
+    }
+
+
+def _append_metric_warning(session_metrics, *, code, message):
+    warnings = session_metrics.setdefault("warnings", [])
+    if any(existing.get("code") == code for existing in warnings):
+        return
+    warnings.append(
+        {
+            "code": str(code),
+            "message": str(message),
+        }
+    )
+
+
 def run_analysis(
     input_source,
     *,
-    player_model="Models/player_detector.pt",
+    player_model="Models/Player_detection_model.pt",
     ball_model="Models/ball_detector_model.pt",
     court_model="Models/court_keypoint_detector.pt",
     court_keypoint_interval=12,
@@ -150,8 +195,10 @@ def run_analysis(
     output_path=None,
     max_dimension=None,
     max_frames=None,
-    start_frame=0,
+    start_frame=2,
     run_suffix=None,
+    initial_carry_state=None,
+    finalize_open_session_state=True,
     progress_callback=None,
 ):
     effective_run_suffix = _build_effective_run_suffix(
@@ -165,6 +212,12 @@ def run_analysis(
     cache_path = resolved_output_path.with_suffix(".json")
     resolved_start_frame = max(0, int(start_frame or 0))
     local_total_frames = None
+    initial_carry_state = dict(initial_carry_state or {})
+    model_file_state = _build_model_file_state(
+        player_model=player_model,
+        ball_model=ball_model,
+        court_model=court_model,
+    )
 
     def emit_progress(progress, message):
         if progress_callback is None:
@@ -197,6 +250,7 @@ def run_analysis(
             max_dimension=max_dimension,
             max_frames=max_frames,
             start_frame=resolved_start_frame,
+            model_file_state=model_file_state,
         )
         if cached_result is not None:
             local_total_frames = cached_result.processed_frames
@@ -259,15 +313,19 @@ def run_analysis(
     identity_data = identity_resolution["identity_data"]
     emit_progress(0.48, "Assigned teams and resolved identities")
 
-    possession_analyzer = BallPossessionAnalyzer()
+    possession_analyzer = BallPossessionAnalyzer(fps=input_fps)
     possession_data = possession_analyzer.detect_possession(
         player_tracks,
         ball_tracks,
         team_assignments,
+        initial_state=initial_carry_state.get("possession"),
     )
 
     pass_interception_detector = PassInterceptionDetector()
-    pass_interception_data = pass_interception_detector.detect(possession_data)
+    pass_interception_data = pass_interception_detector.detect(
+        possession_data,
+        initial_state=initial_carry_state.get("passes"),
+    )
     emit_progress(0.56, "Computed possession and passing")
 
     court_projector = CourtProjector()
@@ -293,8 +351,12 @@ def run_analysis(
         player_tracks,
         ball_tracks,
     )
+    projection_available = any(
+        bool(frame_positions)
+        for frame_positions in projection_data["player_positions_m"]
+    )
 
-    shot_detector = ShotDetector()
+    shot_detector = ShotDetector(fps=input_fps)
     shot_data = shot_detector.detect(
         player_tracks,
         ball_tracks,
@@ -304,9 +366,22 @@ def run_analysis(
     )
 
     speed_distance_calculator = SpeedDistanceCalculator(fps=input_fps)
-    speed_distance_data = speed_distance_calculator.calculate(
-        projection_data["player_positions_m"]
-    )
+    if projection_available:
+        speed_distance_data = speed_distance_calculator.calculate(
+            projection_data["player_positions_m"],
+            initial_state=initial_carry_state.get("movement"),
+            frame_offset=resolved_start_frame,
+        )
+    else:
+        movement_state = dict(initial_carry_state.get("movement") or {})
+        movement_state["previous_positions"] = {}
+        movement_state["previous_frames"] = {}
+        speed_distance_data = {
+            "player_distances_per_frame": [{} for _ in video_frames],
+            "player_speeds_per_frame": [{} for _ in video_frames],
+            "total_distances": {},
+            "state": movement_state,
+        }
     emit_progress(0.76, "Computed shot and movement analytics")
 
     output_video_frames = render_all_annotations(
@@ -337,7 +412,23 @@ def run_analysis(
         pass_interception_data,
         shot_data,
         identity_data=identity_data,
+        initial_state=initial_carry_state.get("session_metrics"),
+        frame_offset=resolved_start_frame,
+        finalize_open_state=bool(finalize_open_session_state),
     )
+    session_metrics_state = session_metrics.pop("state", {})
+    session_metrics.setdefault("overview", {})["projection_available"] = bool(
+        projection_available
+    )
+    if not projection_available:
+        _append_metric_warning(
+            session_metrics,
+            code="court_projection_unavailable",
+            message=(
+                "Court projection was unavailable for this run, so speed, distance, "
+                "shot chart, and hot zone data are limited to detections with valid coordinates."
+            ),
+        )
 
     result = AnalysisRunResult(
         source_key=video_run.source_key,
@@ -347,7 +438,8 @@ def run_analysis(
         fps=input_fps,
         player_model_path=player_model,
         ball_model_path=ball_model,
-        using_court_model=using_court_model,
+        model_file_state=model_file_state,
+        using_court_model=bool(using_court_model and projection_available),
         court_model_path=court_model,
         court_keypoint_interval=int(court_keypoint_interval),
         mode=str(mode),
@@ -361,6 +453,12 @@ def run_analysis(
         chunk_count=None,
         player_ids_are_chunk_local=False,
         chunk_outputs=(),
+        carry_state={
+            "possession": dict(possession_data.get("state", {})),
+            "passes": dict(pass_interception_data.get("state", {})),
+            "movement": dict(speed_distance_data.get("state", {})),
+            "session_metrics": dict(session_metrics_state),
+        },
         session_metrics=session_metrics,
     )
     save_cached_result(cache_path, result)
@@ -371,7 +469,7 @@ def run_analysis(
 def run_chunked_full_analysis(
     input_source,
     *,
-    player_model="Models/player_detector.pt",
+    player_model="Models/Player_detection_model.pt",
     ball_model="Models/ball_detector_model.pt",
     court_model="Models/court_keypoint_detector.pt",
     court_keypoint_interval=12,
@@ -396,6 +494,11 @@ def run_chunked_full_analysis(
     video_run = prepare_video_source(input_source, run_suffix=effective_run_suffix)
     resolved_output_path = Path(output_path) if output_path is not None else video_run.output_path
     cache_path = resolved_output_path.with_suffix(".json")
+    model_file_state = _build_model_file_state(
+        player_model=player_model,
+        ball_model=ball_model,
+        court_model=court_model,
+    )
 
     if use_stubs:
         cached_result = load_cached_result(
@@ -412,6 +515,7 @@ def run_chunked_full_analysis(
             max_dimension=max_dimension,
             max_frames=None,
             start_frame=0,
+            model_file_state=model_file_state,
         )
         if cached_result is not None:
             return cached_result
@@ -426,6 +530,7 @@ def run_chunked_full_analysis(
     chunk_results = []
     chunk_outputs = []
     processed_frames = 0
+    carry_state = {}
 
     if progress_callback is not None:
         progress_callback(
@@ -444,6 +549,7 @@ def run_chunked_full_analysis(
         chunk_max_frames = min(chunk_frames, total_frames - start_frame)
         chunk_suffix = f"{run_suffix}_chunk_{chunk_index:03d}"
         processed_frames_before_chunk = processed_frames
+        is_last_chunk = chunk_index == total_chunks
 
         def chunk_progress(local_payload):
             if progress_callback is None:
@@ -485,9 +591,12 @@ def run_chunked_full_analysis(
             max_frames=chunk_max_frames,
             start_frame=start_frame,
             run_suffix=chunk_suffix,
+            initial_carry_state=carry_state,
+            finalize_open_session_state=is_last_chunk,
             progress_callback=chunk_progress,
         )
         chunk_results.append(chunk_result)
+        carry_state = dict(chunk_result.carry_state)
         processed_frames += chunk_result.processed_frames
 
         chunk_record = {
@@ -541,6 +650,7 @@ def run_chunked_full_analysis(
         fps=input_fps,
         player_model_path=player_model,
         ball_model_path=ball_model,
+        model_file_state=model_file_state,
         using_court_model=any(
             chunk_result.using_court_model for chunk_result in chunk_results
         ),
@@ -557,6 +667,7 @@ def run_chunked_full_analysis(
         chunk_count=total_chunks,
         player_ids_are_chunk_local=total_chunks > 1,
         chunk_outputs=tuple(chunk_outputs),
+        carry_state={},
         session_metrics=combine_chunk_session_metrics(chunk_results),
     )
     save_cached_result(cache_path, result)
@@ -578,6 +689,7 @@ def load_cached_result(
     max_dimension,
     max_frames,
     start_frame,
+    model_file_state,
 ):
     if not cache_path.exists() or not output_path.exists():
         return None
@@ -604,6 +716,8 @@ def load_cached_result(
     if payload.get("player_model_path") != player_model:
         return None
     if payload.get("ball_model_path") != ball_model:
+        return None
+    if payload.get("model_file_state", {}) != model_file_state:
         return None
     if str(payload.get("mode", "game")) != str(mode):
         return None
@@ -645,10 +759,15 @@ def combine_chunk_session_metrics(chunk_results):
     total_made_shots = 0
     shot_events = []
     identity_players = []
+    warnings = []
 
     for chunk_index, chunk_result in enumerate(chunk_results, start=1):
         metrics = chunk_result.session_metrics
         overview = metrics.get("overview", {})
+        for warning in metrics.get("warnings", []):
+            if any(existing.get("code") == warning.get("code") for existing in warnings):
+                continue
+            warnings.append(dict(warning))
         source_frames += int(overview.get("source_frames", chunk_result.processed_frames))
         total_shot_attempts += int(overview.get("total_shot_attempts", 0))
         total_made_shots += int(overview.get("total_made_shots", 0))
@@ -732,6 +851,7 @@ def combine_chunk_session_metrics(chunk_results):
         }
         for team_id in sorted(team_totals)
     ]
+    
     if not team_rows:
         team_rows = [
             {
@@ -763,6 +883,17 @@ def combine_chunk_session_metrics(chunk_results):
     if total_shot_attempts > 0:
         session_field_goal_percentage = (total_made_shots / total_shot_attempts) * 100.0
 
+    if len(chunk_results) > 1:
+        warnings.append(
+            {
+                "code": "chunk_local_player_ids",
+                "message": (
+                    "This run was processed in chunks, so player labels are chunk-local "
+                    "until cross-chunk identity matching is implemented."
+                ),
+            }
+        )
+
     return {
         "overview": {
             "tracked_players": len(player_rows),
@@ -771,6 +902,15 @@ def combine_chunk_session_metrics(chunk_results):
             "source_frames": int(source_frames),
             "chunk_count": len(chunk_results),
             "player_ids_are_chunk_local": len(chunk_results) > 1,
+            "projection_available": all(
+                bool(
+                    chunk_result.session_metrics.get("overview", {}).get(
+                        "projection_available",
+                        False,
+                    )
+                )
+                for chunk_result in chunk_results
+            ),
             "total_shot_attempts": int(total_shot_attempts),
             "total_made_shots": int(total_made_shots),
             "total_missed_shots": int(max(total_shot_attempts - total_made_shots, 0)),
@@ -779,6 +919,7 @@ def combine_chunk_session_metrics(chunk_results):
         "players": player_rows,
         "teams": team_rows,
         "shots": shot_events,
+        "warnings": warnings,
         "identity": {
             "appearance_backend": "chunk_local",
             "ocr_backend": "chunk_local",
