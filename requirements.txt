@@ -1,0 +1,4 @@
+# Incremental runtime dependencies introduced by the CourtVision
+# security and performance pass.
+msgpack>=1.0.7
+slowapi>=0.1.9

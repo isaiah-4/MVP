@@ -1,11 +1,10 @@
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-import importlib.util
 import json
+import logging
 import os
 from pathlib import Path
-import shutil
-from threading import Lock
 from time import time
 from uuid import uuid4
 
@@ -13,6 +12,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.cors import CORSMiddleware
 
 from analysis_pipeline import (
     AnalysisRunResult,
@@ -20,16 +20,25 @@ from analysis_pipeline import (
     run_analysis,
     run_chunked_full_analysis,
 )
-from utils.input_utils import build_source_key, extract_youtube_id, is_youtube_url
+from utils.input_utils import (
+    InputSourceValidationError,
+    build_source_key,
+    extract_youtube_id,
+    is_youtube_url,
+    validate_input_source as validate_requested_input_source,
+)
+from utils.rate_limit_utils import (
+    Limiter,
+    RateLimitExceeded,
+    SLOWAPI_AVAILABLE,
+    _rate_limit_exceeded_handler,
+    get_remote_address,
+)
 
 
+LOGGER = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(PROJECT_ROOT / "web" / "templates"))
-
-app = FastAPI(title="CourtVision MVP", version="0.1.0")
-app.mount("/assets", StaticFiles(directory=str(PROJECT_ROOT / "web" / "static")), name="assets")
-app.mount("/outputs", StaticFiles(directory=str(PROJECT_ROOT / "Output_vids")), name="outputs")
-
 DEFAULT_MAX_WORKERS = max(1, int(os.environ.get("COURTVISION_MAX_WORKERS", "1")))
 JOB_TTL_SECONDS = int(os.environ.get("COURTVISION_JOB_TTL_SECONDS", str(6 * 60 * 60)))
 RESULT_CACHE_TTL_SECONDS = int(
@@ -37,19 +46,13 @@ RESULT_CACHE_TTL_SECONDS = int(
 )
 MAX_COMPLETED_JOBS = int(os.environ.get("COURTVISION_MAX_COMPLETED_JOBS", "100"))
 MAX_CACHED_RESULTS = int(os.environ.get("COURTVISION_MAX_CACHED_RESULTS", "64"))
+DISK_CACHE_KEY_PREFIX = "disk-cache:"
+RATE_LIMIT = os.environ.get("COURTVISION_RATE_LIMIT", "30/minute").strip() or "30/minute"
 WORKOUT_ACCOUNTS = (
     {"id": "primary-athlete", "label": "Primary Athlete"},
     {"id": "development-guard", "label": "Development Guard"},
     {"id": "varsity-wing", "label": "Varsity Wing"},
 )
-
-EXECUTOR = ThreadPoolExecutor(max_workers=DEFAULT_MAX_WORKERS)
-JOB_LOCK = Lock()
-RESULT_CACHE = {}
-RESULT_CACHE_UPDATED_AT = {}
-ACTIVE_JOBS_BY_KEY = {}
-JOBS = {}
-DISK_CACHE_KEY_PREFIX = "disk-cache:"
 ANALYSIS_PROFILES = {
     "preview": {
         "label": "Fast Preview",
@@ -66,6 +69,12 @@ ANALYSIS_PROFILES = {
         "court_keypoint_interval": 12,
     },
 }
+EXECUTOR = ThreadPoolExecutor(max_workers=DEFAULT_MAX_WORKERS)
+JOB_LOCK = asyncio.Lock()
+RESULT_CACHE = {}
+RESULT_CACHE_UPDATED_AT = {}
+ACTIVE_JOBS_BY_KEY = {}
+JOBS = {}
 
 
 @dataclass
@@ -90,6 +99,34 @@ class AnalysisJob:
     partial_outputs: list[dict] = field(default_factory=list)
     created_at: float = 0.0
     updated_at: float = 0.0
+
+
+def get_api_token() -> str:
+    return os.environ.get("COURTVISION_API_TOKEN", "").strip()
+
+
+def resolve_cors_origins() -> list[str]:
+    configured_origins = os.environ.get("COURTVISION_CORS_ORIGINS", "*").strip()
+    if not configured_origins:
+        return []
+    if configured_origins == "*":
+        return ["*"]
+    return [origin.strip() for origin in configured_origins.split(",") if origin.strip()]
+
+
+app = FastAPI(title="CourtVision MVP", version="0.1.0")
+app.mount("/assets", StaticFiles(directory=str(PROJECT_ROOT / "web" / "static")), name="assets")
+app.mount("/outputs", StaticFiles(directory=str(PROJECT_ROOT / "Output_vids")), name="outputs")
+limiter = Limiter(key_func=get_remote_address, default_limits=[])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=resolve_cors_origins(),
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def build_home_context(request, **overrides):
@@ -207,23 +244,6 @@ def normalize_input_key(input_source, analysis_profile, mode, player_id, account
     return f"{profile_key}:file:{source_path}"
 
 
-def validate_input_source(input_source):
-    source = input_source.strip()
-    if is_youtube_url(source):
-        if shutil.which("yt-dlp") is None and importlib.util.find_spec("yt_dlp") is None:
-            raise RuntimeError(
-                "yt-dlp is required to analyze YouTube URLs. Install it before submitting the job."
-            )
-        return
-
-    source_path = Path(source).expanduser()
-    if not source_path.is_absolute():
-        source_path = (PROJECT_ROOT / source_path).resolve()
-
-    if not source_path.exists():
-        raise FileNotFoundError(f"Video file not found: {source_path}")
-
-
 def build_base_source_key(input_source):
     source = input_source.strip()
     if is_youtube_url(source):
@@ -272,37 +292,47 @@ def find_semantic_cached_result(input_source, analysis_profile, mode, player_id)
     return None, None
 
 
-def warm_result_cache_from_disk():
+def _scan_disk_cached_results():
     output_dir = PROJECT_ROOT / "Output_vids"
     if not output_dir.exists():
-        return
+        return []
 
-    with JOB_LOCK:
-        for cache_path in output_dir.glob("*.json"):
-            try:
-                payload = json.loads(cache_path.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
+    entries = []
+    for cache_path in output_dir.glob("*.json"):
+        try:
+            payload = json.loads(cache_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
 
-            if int(payload.get("cache_version", 0)) != RESULT_CACHE_VERSION:
-                continue
+        if int(payload.get("cache_version", 0)) != RESULT_CACHE_VERSION:
+            continue
 
-            try:
-                cached_result = AnalysisRunResult.from_public_dict(payload)
-            except Exception:
-                continue
+        try:
+            cached_result = AnalysisRunResult.from_public_dict(payload)
+        except Exception:
+            continue
 
-            if not cached_result.output_path.exists():
-                continue
+        if not cached_result.output_path.exists():
+            continue
 
-            cache_key = f"{DISK_CACHE_KEY_PREFIX}{cache_path.name}"
+        entries.append(
+            (
+                f"{DISK_CACHE_KEY_PREFIX}{cache_path.name}",
+                cached_result,
+                float(cache_path.stat().st_mtime),
+            )
+        )
+
+    return entries
+
+
+async def warm_result_cache_from_disk():
+    entries = await run_blocking(_scan_disk_cached_results)
+    async with JOB_LOCK:
+        for cache_key, cached_result, updated_at in entries:
             RESULT_CACHE[cache_key] = cached_result
-            RESULT_CACHE_UPDATED_AT[cache_key] = float(cache_path.stat().st_mtime)
-
+            RESULT_CACHE_UPDATED_AT[cache_key] = updated_at
         prune_state_locked()
-
-
-app.add_event_handler("startup", warm_result_cache_from_disk)
 
 
 def render_dashboard(
@@ -342,26 +372,26 @@ def render_dashboard(
     )
 
 
-def submit_or_get_job(input_source, session_name, mode, player_id, account_id, analysis_profile):
+async def submit_or_get_job(input_source, session_name, mode, player_id, account_id, analysis_profile):
     get_analysis_profile_config(analysis_profile)
     validate_session_options(mode, player_id, account_id)
-    validate_input_source(input_source)
+    normalized_input_source = await run_blocking(validate_requested_input_source, input_source)
     cache_key = normalize_input_key(
-        input_source,
+        normalized_input_source,
         analysis_profile,
         mode,
         player_id,
         account_id,
     )
 
-    with JOB_LOCK:
+    async with JOB_LOCK:
         prune_state_locked()
         cached_result = RESULT_CACHE.get(cache_key)
         if cached_result is not None:
-            return cached_result, None
+            return normalized_input_source, cached_result, None
 
         matched_cache_key, cached_result = find_semantic_cached_result(
-            input_source,
+            normalized_input_source,
             analysis_profile,
             mode,
             player_id,
@@ -372,17 +402,17 @@ def submit_or_get_job(input_source, session_name, mode, player_id, account_id, a
                 matched_cache_key,
                 time(),
             )
-            return cached_result, None
+            return normalized_input_source, cached_result, None
 
         active_job_id = ACTIVE_JOBS_BY_KEY.get(cache_key)
         if active_job_id is not None:
-            return None, JOBS[active_job_id]
+            return normalized_input_source, None, JOBS[active_job_id]
 
         job_id = uuid4().hex
         job = AnalysisJob(
             job_id=job_id,
             cache_key=cache_key,
-            input_source=input_source,
+            input_source=normalized_input_source,
             session_name=session_name,
             mode=mode,
             player_id=player_id,
@@ -394,57 +424,37 @@ def submit_or_get_job(input_source, session_name, mode, player_id, account_id, a
         JOBS[job_id] = job
         ACTIVE_JOBS_BY_KEY[cache_key] = job_id
 
-    EXECUTOR.submit(run_job, job_id)
-    return None, job
+    asyncio.create_task(run_job(job_id))
+    return normalized_input_source, None, job
 
 
-def run_job(job_id):
-    with JOB_LOCK:
-        job = JOBS[job_id]
+async def run_job(job_id):
+    async with JOB_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return
         job.status = "running"
         job.progress_message = "Starting analysis"
         job.updated_at = time()
 
     try:
-        profile_config = get_analysis_profile_config(job.analysis_profile)
-        if job.analysis_profile == "full":
-            result = run_chunked_full_analysis(
-                job.input_source,
-                run_suffix=profile_config["run_suffix"],
-                chunk_frames=profile_config.get("chunk_frames", 300),
-                max_dimension=profile_config.get("max_dimension"),
-                court_keypoint_interval=profile_config.get("court_keypoint_interval", 12),
-                mode=job.mode,
-                workout_player_id=job.player_id,
-                progress_callback=lambda payload: update_job_progress(job_id, payload),
-            )
-        else:
-            update_job_progress(
-                job_id,
-                {
-                    "progress": 0.0,
-                    "progress_message": "Analyzing preview",
-                },
-            )
-            result = run_analysis(
-                job.input_source,
-                max_dimension=profile_config.get("max_dimension"),
-                max_frames=profile_config["max_frames"],
-                run_suffix=profile_config["run_suffix"],
-                court_keypoint_interval=profile_config.get("court_keypoint_interval", 12),
-                mode=job.mode,
-                workout_player_id=job.player_id,
-                progress_callback=lambda payload: update_job_progress(job_id, payload),
-            )
+        result = await execute_job_analysis(job)
     except Exception as exc:
-        with JOB_LOCK:
+        LOGGER.exception("Analysis job %s failed", job_id)
+        async with JOB_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                return
             job.status = "failed"
-            job.error = str(exc)
+            job.error = build_safe_job_error(exc)
             job.updated_at = time()
             ACTIVE_JOBS_BY_KEY.pop(job.cache_key, None)
         return
 
-    with JOB_LOCK:
+    async with JOB_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return
         job.status = "completed"
         job.result = result
         job.progress = 1.0
@@ -461,8 +471,74 @@ def run_job(job_id):
         prune_state_locked()
 
 
-def update_job_progress(job_id, payload):
-    with JOB_LOCK:
+async def execute_job_analysis(job):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        EXECUTOR,
+        lambda: run_job_sync(job, loop),
+    )
+
+
+def run_job_sync(job, loop):
+    profile_config = get_analysis_profile_config(job.analysis_profile)
+    progress_callback = lambda payload: dispatch_job_progress(loop, job.job_id, payload)
+
+    if job.analysis_profile == "full":
+        return run_chunked_full_analysis(
+            job.input_source,
+            run_suffix=profile_config["run_suffix"],
+            chunk_frames=profile_config.get("chunk_frames", 300),
+            max_dimension=profile_config.get("max_dimension"),
+            court_keypoint_interval=profile_config.get("court_keypoint_interval", 12),
+            mode=job.mode,
+            workout_player_id=job.player_id,
+            progress_callback=progress_callback,
+        )
+
+    dispatch_job_progress(
+        loop,
+        job.job_id,
+        {
+            "progress": 0.0,
+            "progress_message": "Analyzing preview",
+        },
+    )
+    return run_analysis(
+        job.input_source,
+        max_dimension=profile_config.get("max_dimension"),
+        max_frames=profile_config["max_frames"],
+        run_suffix=profile_config["run_suffix"],
+        court_keypoint_interval=profile_config.get("court_keypoint_interval", 12),
+        mode=job.mode,
+        workout_player_id=job.player_id,
+        progress_callback=progress_callback,
+    )
+
+
+def dispatch_job_progress(loop, job_id, payload):
+    future = asyncio.run_coroutine_threadsafe(update_job_progress(job_id, payload), loop)
+    future.add_done_callback(log_progress_callback_failure)
+
+
+def log_progress_callback_failure(future: Future):
+    try:
+        error = future.exception()
+    except Exception as exc:
+        LOGGER.warning(
+            "Failed to read progress callback result",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        return
+
+    if error is not None:
+        LOGGER.warning(
+            "Failed to update job progress",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+
+async def update_job_progress(job_id, payload):
+    async with JOB_LOCK:
         job = JOBS.get(job_id)
         if job is None or job.status == "failed":
             return
@@ -484,8 +560,8 @@ def update_job_progress(job_id, payload):
         job.updated_at = time()
 
 
-def get_job(job_id):
-    with JOB_LOCK:
+async def get_job(job_id):
+    async with JOB_LOCK:
         prune_state_locked()
         return JOBS.get(job_id)
 
@@ -544,8 +620,65 @@ def prune_state_locked(now=None):
             ACTIVE_JOBS_BY_KEY.pop(job.cache_key, None)
 
 
+async def run_blocking(func, *args, executor=None):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, lambda: func(*args))
+
+
+def build_safe_request_error(exc):
+    if isinstance(exc, (InputSourceValidationError, ValueError)):
+        return str(exc)
+    if isinstance(exc, FileNotFoundError):
+        return "Input video was not found."
+    return "Unable to start analysis."
+
+
+def build_safe_job_error(exc):
+    if isinstance(exc, InputSourceValidationError):
+        return str(exc)
+    if isinstance(exc, FileNotFoundError):
+        return "Input video was not found."
+    if isinstance(exc, ValueError) and str(exc).startswith("Could not open video file:"):
+        return "Could not open the input video."
+    return str(exc) or "Analysis failed."
+
+
+def extract_request_token(request: Request) -> str:
+    authorization_header = request.headers.get("Authorization", "").strip()
+    if authorization_header.startswith("Bearer "):
+        return authorization_header[7:].strip()
+    return request.headers.get("X-API-Token", "").strip()
+
+
+@app.middleware("http")
+async def enforce_api_token(request: Request, call_next):
+    api_token = get_api_token()
+    if not api_token or request.method.upper() == "OPTIONS" or request.url.path == "/health":
+        return await call_next(request)
+
+    provided_token = extract_request_token(request)
+    if not provided_token or provided_token != api_token:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
+    return await call_next(request)
+
+
+@app.on_event("startup")
+async def on_startup():
+    if not SLOWAPI_AVAILABLE:
+        LOGGER.warning(
+            "slowapi is not installed; using the built-in in-memory rate limiter fallback."
+        )
+    await warm_result_cache_from_disk()
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
 @app.get("/", response_class=HTMLResponse)
-def home(request: Request):
+async def home(request: Request):
     return TEMPLATES.TemplateResponse(
         "prototype.html",
         build_prototype_context(request),
@@ -553,7 +686,7 @@ def home(request: Request):
 
 
 @app.get("/prototype", response_class=HTMLResponse)
-def prototype(request: Request):
+async def prototype(request: Request):
     return TEMPLATES.TemplateResponse(
         "prototype.html",
         build_prototype_context(request),
@@ -561,7 +694,7 @@ def prototype(request: Request):
 
 
 @app.get("/classic", response_class=HTMLResponse)
-def classic_home(request: Request):
+async def classic_home(request: Request):
     return TEMPLATES.TemplateResponse(
         "home.html",
         build_home_context(request),
@@ -569,7 +702,8 @@ def classic_home(request: Request):
 
 
 @app.get("/analyze", response_class=HTMLResponse)
-def analyze_session(
+@limiter.limit(RATE_LIMIT)
+async def analyze_session(
     request: Request,
     input: str,
     session_name: str = "New Session",
@@ -588,7 +722,7 @@ def analyze_session(
     }
 
     try:
-        cached_result, job = submit_or_get_job(
+        normalized_input, cached_result, job = await submit_or_get_job(
             input,
             session_name,
             mode,
@@ -597,12 +731,13 @@ def analyze_session(
             analysis_profile,
         )
     except Exception as exc:
+        safe_error = build_safe_request_error(exc)
         return TEMPLATES.TemplateResponse(
             "prototype.html",
             build_prototype_context(
                 request,
                 bootstrap={
-                    "error": str(exc),
+                    "error": safe_error,
                     "form": form,
                 },
             ),
@@ -617,7 +752,7 @@ def analyze_session(
             mode,
             player_id,
             account_id,
-            input,
+            normalized_input,
             analysis_profile,
         )
 
@@ -633,7 +768,7 @@ def analyze_session(
             "player_id": player_id.strip(),
             "account_id": account_id.strip(),
             "account_name": get_workout_account_label(account_id),
-            "input_source": input,
+            "input_source": normalized_input,
             "progress": job.progress,
             "progress_message": job.progress_message,
             "processed_frames": job.processed_frames,
@@ -646,8 +781,8 @@ def analyze_session(
 
 
 @app.get("/results/{job_id}", response_class=HTMLResponse)
-def analysis_result(request: Request, job_id: str):
-    job = get_job(job_id)
+async def analysis_result(request: Request, job_id: str):
+    job = await get_job(job_id)
     if job is None:
         return TEMPLATES.TemplateResponse(
             "home.html",
@@ -710,7 +845,9 @@ def analysis_result(request: Request, job_id: str):
 
 
 @app.get("/api/analyze")
-def analyze_session_api(
+@limiter.limit(RATE_LIMIT)
+async def analyze_session_api(
+    request: Request,
     input: str,
     session_name: str = "New Session",
     mode: str = "game",
@@ -719,7 +856,7 @@ def analyze_session_api(
     account_id: str = "",
 ):
     try:
-        cached_result, job = submit_or_get_job(
+        normalized_input, cached_result, job = await submit_or_get_job(
             input,
             session_name,
             mode,
@@ -731,7 +868,7 @@ def analyze_session_api(
         return JSONResponse(
             {
                 "status": "failed",
-                "error": str(exc),
+                "error": build_safe_request_error(exc),
             },
             status_code=400,
         )
@@ -743,6 +880,7 @@ def analyze_session_api(
         payload["player_id"] = player_id
         payload["account_id"] = account_id
         payload["account_name"] = get_workout_account_label(account_id)
+        payload["input"] = normalized_input
         payload["output_url"] = f"/outputs/{cached_result.output_path.name}"
         payload["status"] = "completed"
         payload["cached"] = True
@@ -757,14 +895,16 @@ def analyze_session_api(
             "analysis_profile": analysis_profile,
             "account_id": account_id,
             "account_name": get_workout_account_label(account_id),
+            "input": normalized_input,
         },
         status_code=202,
     )
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job_status(job_id: str):
-    job = get_job(job_id)
+@limiter.limit(RATE_LIMIT)
+async def get_job_status(request: Request, job_id: str):
+    job = await get_job(job_id)
     if job is None:
         return JSONResponse({"status": "missing"}, status_code=404)
 
@@ -800,14 +940,14 @@ def get_job_status(job_id: str):
 
 
 @app.get("/health")
-def health():
+async def health():
     return {"ok": True}
 
 
 @app.get("/favicon.ico")
 @app.get("/apple-touch-icon.png")
 @app.get("/apple-touch-icon-precomposed.png")
-def quiet_browser_icon_requests():
+async def quiet_browser_icon_requests():
     return Response(status_code=204)
 
 

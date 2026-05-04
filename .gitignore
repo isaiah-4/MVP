@@ -11,6 +11,17 @@ __pycache__/
 # Editor
 .vscode/
 
+# Local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
 # Large assets and generated outputs
 Input_vids/
 Output_vids/

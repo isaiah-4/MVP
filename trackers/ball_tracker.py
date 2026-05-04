@@ -3,15 +3,16 @@ import os
 import numpy as np
 import supervision as sv
 from utils import get_center_of_bbox, save_stub, read_stub
-from .model_store import get_yolo_model
+from .model_store import get_inference_device, get_yolo_model
 
 
 class ballTracker:
     def __init__(self, model_path):
         self.model = get_yolo_model(model_path)
-        self.batch_size = max(
-            1,
-            int(os.environ.get("COURTVISION_BALL_BATCH_SIZE", "12")),
+        self.inference_device = get_inference_device()
+        self.batch_size = _resolve_inference_batch_size(
+            self.inference_device,
+            legacy_env_var="COURTVISION_BALL_BATCH_SIZE",
         )
         self.confidence = float(
             os.environ.get("COURTVISION_BALL_CONFIDENCE", "0.35")
@@ -194,4 +195,18 @@ class ballTracker:
         center_a = np.asarray(get_center_of_bbox(bbox_a), dtype=float)
         center_b = np.asarray(get_center_of_bbox(bbox_b), dtype=float)
         return float(np.linalg.norm(center_a - center_b))
-    
+
+
+def _resolve_inference_batch_size(device, *, legacy_env_var):
+    configured_batch_size = (
+        os.environ.get("COURTVISION_INFERENCE_BATCH_SIZE")
+        or os.environ.get(legacy_env_var)
+    )
+    if configured_batch_size:
+        return max(1, int(configured_batch_size))
+
+    if device == "cuda":
+        return 20
+    if device == "mps":
+        return 8
+    return 4

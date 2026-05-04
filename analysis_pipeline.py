@@ -1,4 +1,5 @@
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -21,6 +22,7 @@ from utils import (
     concatenate_videos,
     get_video_fps,
     get_video_frame_count,
+    iter_frames,
     normalize_player_track_ids_by_team,
     prepare_video_source,
     read_vid,
@@ -266,9 +268,10 @@ def run_analysis(
     )
     if not video_frames:
         raise ValueError(
-            f"No video frames were available from frame {resolved_start_frame}: {video_run.input_path}"
+            "No video frames were available from the requested start frame."
         )
     local_total_frames = len(video_frames)
+    processed_frame_count = local_total_frames
     emit_progress(0.05, "Loaded video frames")
     input_fps = get_video_fps(str(video_run.input_path))
 
@@ -384,8 +387,18 @@ def run_analysis(
         }
     emit_progress(0.76, "Computed shot and movement analytics")
 
+    render_source_frames = video_frames
+    if max_dimension is not None:
+        render_source_frames = iter_frames(
+            str(video_run.input_path),
+            max_dimension=max_dimension,
+            max_frames=max_frames,
+            start_frame=resolved_start_frame,
+        )
+        video_frames = None
+
     output_video_frames = render_all_annotations(
-        video_frames,
+        render_source_frames,
         player_tracks=player_tracks,
         ball_tracks=ball_tracks,
         court_keypoints=court_keypoints,
@@ -401,21 +414,29 @@ def run_analysis(
     )
     emit_progress(0.9, "Rendered overlays")
 
-    save_vid(output_video_frames, str(resolved_output_path), fps=input_fps)
+    with ThreadPoolExecutor(max_workers=1) as video_writer_executor:
+        video_save_future = video_writer_executor.submit(
+            save_vid,
+            output_video_frames,
+            str(resolved_output_path),
+            input_fps,
+        )
+
+        session_metrics_builder = SessionMetricsBuilder(input_fps)
+        session_metrics = session_metrics_builder.build(
+            player_tracks,
+            team_assignments,
+            possession_data,
+            pass_interception_data,
+            shot_data,
+            identity_data=identity_data,
+            initial_state=initial_carry_state.get("session_metrics"),
+            frame_offset=resolved_start_frame,
+            finalize_open_state=bool(finalize_open_session_state),
+        )
+        video_save_future.result()
     emit_progress(0.97, "Saved processed video")
 
-    session_metrics_builder = SessionMetricsBuilder(input_fps)
-    session_metrics = session_metrics_builder.build(
-        player_tracks,
-        team_assignments,
-        possession_data,
-        pass_interception_data,
-        shot_data,
-        identity_data=identity_data,
-        initial_state=initial_carry_state.get("session_metrics"),
-        frame_offset=resolved_start_frame,
-        finalize_open_state=bool(finalize_open_session_state),
-    )
     session_metrics_state = session_metrics.pop("state", {})
     session_metrics.setdefault("overview", {})["projection_available"] = bool(
         projection_available
@@ -448,7 +469,7 @@ def run_analysis(
         max_dimension=None if max_dimension is None else int(max_dimension),
         max_frames=None if max_frames is None else int(max_frames),
         start_frame=resolved_start_frame,
-        processed_frames=len(video_frames),
+        processed_frames=processed_frame_count,
         chunk_index=None,
         chunk_count=None,
         player_ids_are_chunk_local=False,
@@ -522,7 +543,7 @@ def run_chunked_full_analysis(
 
     total_frames = get_video_frame_count(str(video_run.input_path))
     if total_frames <= 0:
-        raise ValueError(f"Video contains no frames: {video_run.input_path}")
+        raise ValueError("Video contains no frames.")
 
     input_fps = get_video_fps(str(video_run.input_path))
     chunk_frames = int(chunk_frames)

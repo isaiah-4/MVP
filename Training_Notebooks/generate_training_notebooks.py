@@ -36,9 +36,10 @@ def build_notebook(
     task_key: str,
     env_prefix: str,
     output_model_path: str,
-    default_workspace: str,
+    default_workspace: str | None,
     default_project: str,
     default_version: int,
+    default_dataset_format: str,
     primary_goal: str,
 ) -> dict:
     notebook_source = [
@@ -55,7 +56,9 @@ def build_notebook(
             "- Default profile: `balanced`.\n"
             "- Recommended family: `YOLO26`.\n"
             "- Why not switch to Roboflow-hosted RF-DETR here: the backend currently consumes local Ultralytics `.pt` weights directly, so YOLO26 is the strongest drop-in upgrade.\n"
-            "- Override with env vars if you want a heavier `quality` run or a lighter `edge` run."
+            "- Override with env vars if you want a heavier `quality` run or a lighter `edge` run.\n"
+            f"- Default Roboflow project: `{default_project}` version `{default_version}` exported as `{default_dataset_format}`.\n"
+            "- Set `ROBOFLOW_WORKSPACE` in the notebook environment before running against a private workspace. This repo does not store a workspace slug."
         ),
         code_cell(
             "# Install dependencies once per fresh notebook runtime\n"
@@ -63,6 +66,7 @@ def build_notebook(
         ),
         code_cell(
             "from __future__ import annotations\n\n"
+            "import os\n"
             "import sys\n"
             "from pathlib import Path\n\n"
             "from ultralytics import YOLO\n\n"
@@ -84,13 +88,16 @@ def build_notebook(
             "    normalize_data_yaml,\n"
             "    write_training_summary,\n"
             ")\n\n"
+            "default_workspace = os.environ.get(\"ROBOFLOW_WORKSPACE\")\n"
+            "# Set ROBOFLOW_WORKSPACE before running if the dataset lives in a private Roboflow workspace.\n"
             "config = build_training_config(\n"
             f"    task_key=\"{task_key}\",\n"
             f"    env_prefix=\"{env_prefix}\",\n"
             f"    output_model_path=\"{output_model_path}\",\n"
-            f"    default_workspace=\"{default_workspace}\",\n"
+            "    default_workspace=default_workspace,\n"
             f"    default_project=\"{default_project}\",\n"
             f"    default_version={default_version},\n"
+            f"    default_dataset_format=\"{default_dataset_format}\",\n"
             ")\n"
             "config"
         ),
@@ -172,9 +179,10 @@ def main() -> None:
             task_key="ball",
             env_prefix="BALL",
             output_model_path="Models/ball_detector_model.pt",
-            default_workspace="cricket-qnb5l",
+            default_workspace=None,
             default_project="basketball-xil7x",
             default_version=1,
+            default_dataset_format="yolo26",
             primary_goal="small-object recall without making the final detector unnecessarily heavy",
         ),
         repo_root / "Training_Notebooks" / "basketball_player_detection_training.ipynb": build_notebook(
@@ -182,9 +190,10 @@ def main() -> None:
             task_key="player",
             env_prefix="PLAYER",
             output_model_path="Models/Player_detection_model.pt",
-            default_workspace="cricket-qnb5l",
-            default_project="basketball-xil7x",
-            default_version=1,
+            default_workspace=None,
+            default_project="basketball-players-fy4c2-6jpll",
+            default_version=3,
+            default_dataset_format="yolo26",
             primary_goal="crowded player detection while keeping inference practical on a MacBook Air",
         ),
     }

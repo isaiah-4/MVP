@@ -1,3 +1,6 @@
+from concurrent.futures import ProcessPoolExecutor
+import os
+
 import cv2
 import numpy as np
 
@@ -25,120 +28,88 @@ def render_all_annotations(
     ball_control_color=(0, 255, 255),
     keypoint_color=(0, 255, 255),
 ):
-    # Build the tactical court once for the full render pass, then copy per frame.
     court_template = _build_court_template(court_projector)
+    # Keep rendering single-process by default. Multi-process is only useful on
+    # larger GPU servers, so opt in with COURTVISION_RENDER_WORKERS when needed.
+    render_workers = max(1, int(os.environ.get("COURTVISION_RENDER_WORKERS", "1")))
+    if render_workers <= 1:
+        return _render_annotation_segment(
+            video_frames,
+            player_tracks=player_tracks,
+            ball_tracks=ball_tracks,
+            court_keypoints=court_keypoints,
+            passes_per_frame=pass_interception_data["passes_per_frame"],
+            interceptions_per_frame=pass_interception_data["interceptions_per_frame"],
+            player_distances_per_frame=player_distances_per_frame,
+            player_speeds_per_frame=player_speeds_per_frame,
+            player_positions_m=player_positions_m,
+            ball_positions_m=ball_positions_m,
+            team_assignments=team_assignments,
+            possession_players=possession_data["player"],
+            court_template=court_template,
+            court_projector=court_projector,
+            team_colors=team_colors,
+            default_player_color=default_player_color,
+            ball_pointer_color=ball_pointer_color,
+            ball_control_color=ball_control_color,
+            keypoint_color=keypoint_color,
+        )
+
+    frame_sequence = video_frames if isinstance(video_frames, list) else list(video_frames)
+    frame_count = len(frame_sequence)
+    if frame_count <= 1:
+        return _render_annotation_segment(
+            frame_sequence,
+            player_tracks=player_tracks,
+            ball_tracks=ball_tracks,
+            court_keypoints=court_keypoints,
+            passes_per_frame=pass_interception_data["passes_per_frame"],
+            interceptions_per_frame=pass_interception_data["interceptions_per_frame"],
+            player_distances_per_frame=player_distances_per_frame,
+            player_speeds_per_frame=player_speeds_per_frame,
+            player_positions_m=player_positions_m,
+            ball_positions_m=ball_positions_m,
+            team_assignments=team_assignments,
+            possession_players=possession_data["player"],
+            court_template=court_template,
+            court_projector=court_projector,
+            team_colors=team_colors,
+            default_player_color=default_player_color,
+            ball_pointer_color=ball_pointer_color,
+            ball_control_color=ball_control_color,
+            keypoint_color=keypoint_color,
+        )
+
+    segment_bounds = _build_segment_bounds(frame_count, render_workers)
     output_frames = []
-    marker_radius = 8
-
-    for frame_num, source_frame in enumerate(video_frames):
-        frame = source_frame.copy()
-        holder_id = possession_data["player"][frame_num]
-        frame_players = player_tracks[frame_num]
-
-        for tracker_id, player in frame_players.items():
-            bbox = player.get("bbox") or player.get("box")
-            if bbox is None:
-                continue
-
-            player_color = player.get("team_color", default_player_color)
-            frame = draw_ellipse(
-                frame,
-                bbox,
-                player_color,
-                tracker_id=player.get("display_id", tracker_id),
+    with ProcessPoolExecutor(max_workers=min(render_workers, len(segment_bounds))) as executor:
+        futures = [
+            executor.submit(
+                _render_annotation_segment,
+                frame_sequence[start_index:end_index],
+                player_tracks=player_tracks[start_index:end_index],
+                ball_tracks=ball_tracks[start_index:end_index],
+                court_keypoints=court_keypoints[start_index:end_index],
+                passes_per_frame=pass_interception_data["passes_per_frame"][start_index:end_index],
+                interceptions_per_frame=pass_interception_data["interceptions_per_frame"][start_index:end_index],
+                player_distances_per_frame=player_distances_per_frame[start_index:end_index],
+                player_speeds_per_frame=player_speeds_per_frame[start_index:end_index],
+                player_positions_m=player_positions_m[start_index:end_index],
+                ball_positions_m=ball_positions_m[start_index:end_index],
+                team_assignments=team_assignments[start_index:end_index],
+                possession_players=possession_data["player"][start_index:end_index],
+                court_template=court_template,
+                court_projector=court_projector,
+                team_colors=team_colors,
+                default_player_color=default_player_color,
+                ball_pointer_color=ball_pointer_color,
+                ball_control_color=ball_control_color,
+                keypoint_color=keypoint_color,
             )
-
-            if player.get("has_ball"):
-                x_center, _ = get_center_of_bbox(bbox)
-                marker_y = max(marker_radius + 2, int(bbox[1]) - 12)
-                cv2.circle(
-                    frame,
-                    (int(x_center), marker_y),
-                    marker_radius,
-                    ball_control_color,
-                    2,
-                )
-
-        for _, track in ball_tracks[frame_num].items():
-            bbox = track.get("bbox") or track.get("box")
-            if bbox is None:
-                continue
-            frame = draw_triangle(frame, bbox, ball_pointer_color)
-
-        for keypoint_id, point in court_keypoints[frame_num].items():
-            point_x, point_y = int(point[0]), int(point[1])
-            cv2.circle(frame, (point_x, point_y), 5, keypoint_color, -1)
-            cv2.circle(frame, (point_x, point_y), 7, (0, 0, 0), 1)
-            frame = put_text_with_outline(
-                frame,
-                str(keypoint_id),
-                (point_x + 6, point_y - 6),
-                font_scale=0.45,
-                color=(255, 255, 255),
-                thickness=1,
-            )
-
-        passes = pass_interception_data["passes_per_frame"][frame_num]
-        interceptions = pass_interception_data["interceptions_per_frame"][frame_num]
-        frame = _draw_scoreboard(frame, passes, interceptions, team_colors)
-
-        frame_distances = player_distances_per_frame[frame_num]
-        frame_speeds = player_speeds_per_frame[frame_num]
-        for player_id, player in frame_players.items():
-            bbox = player.get("bbox") or player.get("box")
-            if bbox is None:
-                continue
-
-            speed = frame_speeds.get(player_id)
-            distance = frame_distances.get(player_id)
-            if speed is None and distance is None:
-                continue
-
-            foot_x, foot_y = get_foot_position(bbox)
-            text_x = max(8, int(foot_x) - 45)
-            text_y = int(foot_y) + 34
-
-            if speed is not None:
-                frame = put_text_with_outline(
-                    frame,
-                    f"{speed:.2f} km/h",
-                    (text_x, text_y),
-                    font_scale=0.43,
-                    color=(255, 255, 255),
-                    thickness=1,
-                )
-
-            if distance is not None:
-                frame = put_text_with_outline(
-                    frame,
-                    f"{distance:.2f} m",
-                    (text_x, text_y + 18),
-                    font_scale=0.43,
-                    color=(255, 255, 255),
-                    thickness=1,
-                )
-
-        tactical_frame = court_template.copy()
-        frame_positions = player_positions_m[frame_num]
-        frame_assignment = team_assignments[frame_num]
-
-        for player_id, meter_position in frame_positions.items():
-            team_id = frame_assignment.get(player_id, 1)
-            color = team_colors.get(team_id, default_player_color)
-            point_x, point_y = court_projector.meter_to_pixel(meter_position)
-            cv2.circle(tactical_frame, (point_x, point_y), 8, color, -1)
-            cv2.circle(tactical_frame, (point_x, point_y), 10, (0, 0, 0), 1)
-
-            if player_id == holder_id:
-                cv2.circle(tactical_frame, (point_x, point_y), 14, (0, 0, 255), 2)
-
-        ball_position = ball_positions_m[frame_num]
-        if ball_position is not None:
-            ball_x, ball_y = court_projector.meter_to_pixel(ball_position)
-            cv2.circle(tactical_frame, (ball_x, ball_y), 5, ball_pointer_color, -1)
-            cv2.circle(tactical_frame, (ball_x, ball_y), 7, (0, 0, 0), 1)
-
-        output_frames.append(_append_panel(frame, tactical_frame))
+            for start_index, end_index in segment_bounds
+        ]
+        for future in futures:
+            output_frames.extend(future.result())
 
     return output_frames
 
@@ -201,3 +172,161 @@ def _append_panel(frame, tactical_frame):
     resized_panel = cv2.resize(tactical_frame, (scaled_width, frame_height))
     separator = np.full((frame_height, 8, 3), (32, 32, 32), dtype=np.uint8)
     return np.concatenate([frame, separator, resized_panel], axis=1)
+
+
+def _render_annotation_segment(
+    video_frames,
+    *,
+    player_tracks,
+    ball_tracks,
+    court_keypoints,
+    passes_per_frame,
+    interceptions_per_frame,
+    player_distances_per_frame,
+    player_speeds_per_frame,
+    player_positions_m,
+    ball_positions_m,
+    team_assignments,
+    possession_players,
+    court_template,
+    court_projector,
+    team_colors,
+    default_player_color,
+    ball_pointer_color,
+    ball_control_color,
+    keypoint_color,
+):
+    output_frames = []
+    marker_radius = 8
+
+    for frame_num, source_frame in enumerate(video_frames):
+        frame = source_frame.copy()
+        holder_id = possession_players[frame_num]
+        frame_players = player_tracks[frame_num]
+
+        for tracker_id, player in frame_players.items():
+            bbox = player.get("bbox") or player.get("box")
+            if bbox is None:
+                continue
+
+            player_color = player.get("team_color", default_player_color)
+            frame = draw_ellipse(
+                frame,
+                bbox,
+                player_color,
+                tracker_id=player.get("display_id", tracker_id),
+            )
+
+            if player.get("has_ball"):
+                x_center, _ = get_center_of_bbox(bbox)
+                marker_y = max(marker_radius + 2, int(bbox[1]) - 12)
+                cv2.circle(
+                    frame,
+                    (int(x_center), marker_y),
+                    marker_radius,
+                    ball_control_color,
+                    2,
+                )
+
+        for _, track in ball_tracks[frame_num].items():
+            bbox = track.get("bbox") or track.get("box")
+            if bbox is None:
+                continue
+            frame = draw_triangle(frame, bbox, ball_pointer_color)
+
+        for keypoint_id, point in court_keypoints[frame_num].items():
+            point_x, point_y = int(point[0]), int(point[1])
+            cv2.circle(frame, (point_x, point_y), 5, keypoint_color, -1)
+            cv2.circle(frame, (point_x, point_y), 7, (0, 0, 0), 1)
+            frame = put_text_with_outline(
+                frame,
+                str(keypoint_id),
+                (point_x + 6, point_y - 6),
+                font_scale=0.45,
+                color=(255, 255, 255),
+                thickness=1,
+            )
+
+        frame = _draw_scoreboard(
+            frame,
+            passes_per_frame[frame_num],
+            interceptions_per_frame[frame_num],
+            team_colors,
+        )
+
+        frame_distances = player_distances_per_frame[frame_num]
+        frame_speeds = player_speeds_per_frame[frame_num]
+        for player_id, player in frame_players.items():
+            bbox = player.get("bbox") or player.get("box")
+            if bbox is None:
+                continue
+
+            speed = frame_speeds.get(player_id)
+            distance = frame_distances.get(player_id)
+            if speed is None and distance is None:
+                continue
+
+            foot_x, foot_y = get_foot_position(bbox)
+            text_x = max(8, int(foot_x) - 45)
+            text_y = int(foot_y) + 34
+
+            if speed is not None:
+                frame = put_text_with_outline(
+                    frame,
+                    f"{speed:.2f} km/h",
+                    (text_x, text_y),
+                    font_scale=0.43,
+                    color=(255, 255, 255),
+                    thickness=1,
+                )
+
+            if distance is not None:
+                frame = put_text_with_outline(
+                    frame,
+                    f"{distance:.2f} m",
+                    (text_x, text_y + 18),
+                    font_scale=0.43,
+                    color=(255, 255, 255),
+                    thickness=1,
+                )
+
+        tactical_frame = court_template.copy()
+        frame_positions = player_positions_m[frame_num]
+        frame_assignment = team_assignments[frame_num]
+
+        for player_id, meter_position in frame_positions.items():
+            team_id = frame_assignment.get(player_id, 1)
+            color = team_colors.get(team_id, default_player_color)
+            point_x, point_y = court_projector.meter_to_pixel(meter_position)
+            cv2.circle(tactical_frame, (point_x, point_y), 8, color, -1)
+            cv2.circle(tactical_frame, (point_x, point_y), 10, (0, 0, 0), 1)
+
+            if player_id == holder_id:
+                cv2.circle(tactical_frame, (point_x, point_y), 14, (0, 0, 255), 2)
+
+        ball_position = ball_positions_m[frame_num]
+        if ball_position is not None:
+            ball_x, ball_y = court_projector.meter_to_pixel(ball_position)
+            cv2.circle(tactical_frame, (ball_x, ball_y), 5, ball_pointer_color, -1)
+            cv2.circle(tactical_frame, (ball_x, ball_y), 7, (0, 0, 0), 1)
+
+        output_frames.append(_append_panel(frame, tactical_frame))
+
+    return output_frames
+
+
+def _build_segment_bounds(frame_count, worker_count):
+    segment_count = max(1, min(frame_count, int(worker_count)))
+    base_segment_size = frame_count // segment_count
+    remainder = frame_count % segment_count
+    bounds = []
+    start_index = 0
+
+    for segment_index in range(segment_count):
+        segment_size = base_segment_size + (1 if segment_index < remainder else 0)
+        end_index = start_index + segment_size
+        if start_index != end_index:
+            bounds.append((start_index, end_index))
+        start_index = end_index
+
+    return bounds

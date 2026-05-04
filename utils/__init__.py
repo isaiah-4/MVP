@@ -2,6 +2,7 @@ from .video_utils import (
     concatenate_videos,
     get_video_fps,
     get_video_frame_count,
+    iter_frames,
     read_vid,
     save_vid,
 )

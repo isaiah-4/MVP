@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 import math
 import os
 from pathlib import Path
@@ -58,6 +59,7 @@ class PlayerIdentityResolver:
             self._trocr_model_id,
             self._trocr_device,
         ) = self._resolve_ocr_backends()
+        self._ocr_workers = max(1, int(os.environ.get("COURTVISION_OCR_WORKERS", "2")))
 
     def resolve(
         self,
@@ -102,6 +104,7 @@ class PlayerIdentityResolver:
 
     def _collect_profiles(self, video_frames, player_tracks, team_assignments):
         profiles = {}
+        ocr_requests = []
 
         for frame_num, frame_tracks in enumerate(player_tracks):
             frame_assignments = team_assignments[frame_num] if frame_num < len(team_assignments) else {}
@@ -158,13 +161,30 @@ class PlayerIdentityResolver:
                     profile["embeddings"].append(embedding)
 
                 if sample_index < self.max_ocr_samples_per_track:
-                    jersey_number = self._read_jersey_number(
-                        sample["ocr_crop"],
-                        trocr_crop=sample.get("trocr_crop"),
+                    ocr_requests.append(
+                        (
+                            profile,
+                            sample["ocr_crop"],
+                            sample.get("trocr_crop"),
+                        )
                     )
+
+        if self._ocr_enabled and ocr_requests:
+            with ThreadPoolExecutor(max_workers=self._ocr_workers) as executor:
+                futures = [
+                    executor.submit(
+                        self._read_jersey_number,
+                        crop,
+                        trocr_crop=trocr_crop,
+                    )
+                    for _, crop, trocr_crop in ocr_requests
+                ]
+                for (profile, _, _), future in zip(ocr_requests, futures):
+                    jersey_number = future.result()
                     if jersey_number is not None:
                         profile["ocr_votes"][jersey_number] += 1
 
+        for profile in profiles.values():
             if profile["embeddings"]:
                 profile["embedding"] = np.mean(profile["embeddings"], axis=0)
                 profile["embedding"] = _normalize_vector(profile["embedding"])

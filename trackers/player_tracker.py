@@ -3,15 +3,16 @@ import os
 import numpy as np
 import supervision as sv
 from utils import save_stub, read_stub
-from .model_store import get_yolo_model
+from .model_store import get_inference_device, get_yolo_model
 
 class PlayerTracker:
     def __init__(self, model_path):
         self.model = get_yolo_model(model_path)
         self.tracker = sv.ByteTrack()
-        self.batch_size = max(
-            1,
-            int(os.environ.get("COURTVISION_PLAYER_BATCH_SIZE", "12")),
+        self.inference_device = get_inference_device()
+        self.batch_size = _resolve_inference_batch_size(
+            self.inference_device,
+            legacy_env_var="COURTVISION_PLAYER_BATCH_SIZE",
         )
         self.confidence = float(
             os.environ.get("COURTVISION_PLAYER_CONFIDENCE", "0.5")
@@ -78,3 +79,18 @@ class PlayerTracker:
         save_stub(stub_path, tracker)
 
         return tracker
+
+
+def _resolve_inference_batch_size(device, *, legacy_env_var):
+    configured_batch_size = (
+        os.environ.get("COURTVISION_INFERENCE_BATCH_SIZE")
+        or os.environ.get(legacy_env_var)
+    )
+    if configured_batch_size:
+        return max(1, int(configured_batch_size))
+
+    if device == "cuda":
+        return 20
+    if device == "mps":
+        return 8
+    return 4

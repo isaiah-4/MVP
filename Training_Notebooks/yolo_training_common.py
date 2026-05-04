@@ -126,9 +126,10 @@ def build_training_config(
     task_key: str,
     env_prefix: str,
     output_model_path: str,
-    default_workspace: str,
+    default_workspace: str | None,
     default_project: str,
     default_version: int,
+    default_dataset_format: str = "yolo26",
 ) -> dict[str, Any]:
     task_key = task_key.lower().strip()
     env_prefix = env_prefix.upper().strip()
@@ -159,10 +160,9 @@ def build_training_config(
         "seed": seed,
         "profile": requested_profile,
         "task_name": f"basketball-{task_key}-detector",
-        "workspace": os.environ.get(f"ROBOFLOW_{env_prefix}_WORKSPACE", default_workspace),
         "project": os.environ.get(f"ROBOFLOW_{env_prefix}_PROJECT", default_project),
         "version": int(os.environ.get(f"ROBOFLOW_{env_prefix}_VERSION", str(default_version))),
-        "dataset_format": os.environ.get(f"ROBOFLOW_{env_prefix}_FORMAT", "yolov8"),
+        "dataset_format": os.environ.get(f"ROBOFLOW_{env_prefix}_FORMAT", default_dataset_format),
         "base_model": os.environ.get(f"COURTVISION_{env_prefix}_BASE_MODEL", preset.base_model),
         "epochs": int(os.environ.get(f"COURTVISION_{env_prefix}_EPOCHS", str(preset.epochs))),
         "image_size": int(os.environ.get(f"COURTVISION_{env_prefix}_IMGSZ", str(preset.image_size))),
@@ -190,10 +190,21 @@ def build_training_config(
         ),
         "notes": list(preset.notes),
     }
+    config["workspace"] = (
+        os.environ.get(f"ROBOFLOW_{env_prefix}_WORKSPACE")
+        or os.environ.get("ROBOFLOW_WORKSPACE")
+        or default_workspace
+    )
+    if not config["workspace"]:
+        raise ValueError(
+            f"Set ROBOFLOW_{env_prefix}_WORKSPACE or ROBOFLOW_WORKSPACE before running this notebook."
+        )
 
-    api_key = os.environ.get("ROBOFLOW_API_KEY")
+    api_key = os.environ.get(f"ROBOFLOW_{env_prefix}_API_KEY") or os.environ.get("ROBOFLOW_API_KEY")
     if not api_key:
-        raise ValueError("Set ROBOFLOW_API_KEY before running this notebook.")
+        raise ValueError(
+            f"Set ROBOFLOW_{env_prefix}_API_KEY or ROBOFLOW_API_KEY before running this notebook."
+        )
     config["roboflow_api_key"] = api_key
     return config
 

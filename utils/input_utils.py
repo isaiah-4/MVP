@@ -17,6 +17,9 @@ YOUTUBE_HOSTS = {
     "m.youtube.com",
 }
 YOUTUBE_DOWNLOAD_FORMAT = "best[height<=720][ext=mp4]/best[height<=720]/best[ext=mp4]/best"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+INPUT_VIDEOS_ROOT = (PROJECT_ROOT / "Input_vids").resolve()
+STUB_FILE_SUFFIX = ".msgpack.gz"
 
 
 @dataclass(frozen=True)
@@ -30,22 +33,20 @@ class VideoRunPaths:
     court_stub_path: Path
 
 
+class InputSourceValidationError(ValueError):
+    """Raised when a requested input source is not allowed."""
+
+
 def prepare_video_source(source: str, run_suffix: str | None = None) -> VideoRunPaths:
-    project_root = Path(__file__).resolve().parent.parent
-    source = source.strip()
+    validated_source = validate_input_source(source)
 
-    if is_youtube_url(source):
-        base_source_key = build_source_key(source)
-        download_path = project_root / "Input_vids" / "downloads" / f"{base_source_key}.mp4"
-        input_path = ensure_youtube_download(source, download_path)
+    if is_youtube_url(validated_source):
+        base_source_key = build_source_key(validated_source)
+        download_path = PROJECT_ROOT / "Input_vids" / "downloads" / f"{base_source_key}.mp4"
+        input_path = ensure_youtube_download(validated_source, download_path)
     else:
-        input_path = Path(source).expanduser()
-        if not input_path.is_absolute():
-            input_path = (project_root / input_path).resolve()
-
-        if not input_path.exists():
-            raise FileNotFoundError(f"Video file not found: {input_path}")
-        base_source_key = build_source_key(source, resolved_path=input_path)
+        input_path = resolve_local_input_path(validated_source)
+        base_source_key = build_source_key(validated_source, resolved_path=input_path)
 
     source_key = base_source_key
     if run_suffix:
@@ -55,11 +56,47 @@ def prepare_video_source(source: str, run_suffix: str | None = None) -> VideoRun
         source_key=source_key,
         base_source_key=base_source_key,
         input_path=input_path,
-        output_path=project_root / "Output_vids" / f"{source_key}_output.mp4",
-        player_stub_path=project_root / "stubs" / f"{source_key}_player_tracker.pkl",
-        ball_stub_path=project_root / "stubs" / f"{source_key}_ball_tracker.pkl",
-        court_stub_path=project_root / "stubs" / f"{source_key}_court_keypoints.pkl",
+        output_path=PROJECT_ROOT / "Output_vids" / f"{source_key}_output.mp4",
+        player_stub_path=PROJECT_ROOT / "stubs" / f"{source_key}_player_tracker{STUB_FILE_SUFFIX}",
+        ball_stub_path=PROJECT_ROOT / "stubs" / f"{source_key}_ball_tracker{STUB_FILE_SUFFIX}",
+        court_stub_path=PROJECT_ROOT / "stubs" / f"{source_key}_court_keypoints{STUB_FILE_SUFFIX}",
     )
+
+
+def validate_input_source(source: str, *, require_exists: bool = True) -> str:
+    normalized_source = str(source or "").strip()
+    if not normalized_source:
+        raise InputSourceValidationError("Input source is required.")
+
+    if is_youtube_url(normalized_source):
+        if extract_youtube_id(normalized_source) is None:
+            raise InputSourceValidationError(
+                "Input source must be a file inside Input_vids or a supported YouTube URL."
+            )
+        if shutil.which("yt-dlp") is None and importlib.util.find_spec("yt_dlp") is None:
+            raise InputSourceValidationError(
+                "YouTube analysis is unavailable on this server because yt-dlp is not installed."
+            )
+        return normalized_source
+
+    input_path = resolve_local_input_path(normalized_source)
+    if not _is_relative_to(input_path, INPUT_VIDEOS_ROOT):
+        raise InputSourceValidationError(
+            "Input source must be a file inside Input_vids or a supported YouTube URL."
+        )
+    if require_exists and (not input_path.exists() or not input_path.is_file()):
+        raise InputSourceValidationError("Input video was not found.")
+
+    return str(input_path.relative_to(PROJECT_ROOT))
+
+
+def resolve_local_input_path(source: str) -> Path:
+    input_path = Path(str(source or "").strip()).expanduser()
+    if not input_path.is_absolute():
+        input_path = (PROJECT_ROOT / input_path).resolve()
+    else:
+        input_path = input_path.resolve()
+    return input_path
 
 
 def build_source_key(source: str, resolved_path: Path | None = None) -> str:
@@ -206,3 +243,11 @@ def extract_youtube_id(source: str) -> str | None:
 def sanitize_name(value: str) -> str:
     cleaned_value = re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_")
     return cleaned_value or "video"
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
